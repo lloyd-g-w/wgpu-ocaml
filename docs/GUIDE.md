@@ -87,6 +87,56 @@ That is how everything in this repository is tested. If you cannot install
 system packages at all, `scripts/no-root-deps.sh` sets up `libffi` and
 `pkg-config` in a throw-away prefix under `/tmp`.
 
+### Nix / NixOS
+
+The repository's `flake.nix` and committed `flake.lock` provide a reproducible
+**system-dependency shell**, not a Nix build of the OCaml package. It includes
+both `pkgconf` and `pkg-config`, `libffi` and its development headers, a C
+compiler, make, opam, git, curl and unzip. OCaml and its packages
+are deliberately left to opam so the compiler stays at **5.5.1** regardless of
+which OCaml version nixpkgs carries. The pinned downloader still installs
+wgpu-native; nixpkgs' potentially incompatible version is not used.
+
+From the cloned repository:
+
+```sh
+nix develop                 # host GPU drivers; Linux or macOS
+# Or, on Linux, use Mesa lavapipe with no GPU or host graphics driver:
+# nix develop .#software
+
+# On first use of opam only:
+opam init --bare --no-setup
+
+# Create the switch INSIDE the Nix shell, not with a different system compiler:
+opam switch create . ocaml-base-compiler.5.5.1 --no-install
+eval "$(opam env)"
+opam install . --deps-only --with-test --with-doc --assume-depexts
+
+dune exec scripts/fetch_wgpu_native.exe
+dune build @runtest @gpu
+dune exec examples/headless_compute.exe
+```
+
+If you already created the switch inside this shell, skip `opam init` and
+`opam switch create` on subsequent visits; enter `nix develop` and run
+`eval "$(opam env)"` again. `--assume-depexts` avoids asking opam to install
+system packages outside Nix. You can verify the critical dependency with
+`pkg-config --modversion libffi`.
+
+On Linux the default shell exposes the Nix Vulkan loader through
+`LD_LIBRARY_PATH` and includes `/run/opengl-driver/lib` for NixOS host drivers.
+It does **not** install or select your hardware driver; on NixOS that is a
+system configuration concern (`hardware.graphics.enable` and the appropriate
+driver). The `software` shell instead selects the Nix Mesa lavapipe ICD using
+both `VK_DRIVER_FILES` and `VK_ICD_FILENAMES`, avoiding hard-coded `/usr/share`
+paths. macOS uses the system Metal backend; there is no `software` shell there.
+Flake outputs cover x86_64/aarch64 Linux and macOS, but only Linux x86_64 is
+runtime-tested by this project.
+
+If flakes are not enabled in your Nix configuration, use
+`nix --extra-experimental-features 'nix-command flakes' develop` (and append
+`.#software` when desired).
+
 ### Using it from your own project
 
 The package is not released to opam. Until it is, pin the repository:

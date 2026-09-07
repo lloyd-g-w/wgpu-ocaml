@@ -84,6 +84,27 @@ To use the bindings from another project before there is an opam release:
 `opam pin add wgpu https://github.com/lloyd-g-w/wgpu-ocaml.git` — but read
 [Licensing](#licensing) first.
 
+### Nix / NixOS
+
+`nix develop` supplies the system dependencies: **pkgconf**, **pkg-config**,
+**libffi**, a C compiler, opam, make, curl and unzip. On Linux
+it also supplies the Vulkan loader and diagnostic tools; your hardware driver
+still comes from the host. Use `nix develop .#software` to select Nix-provided
+Mesa lavapipe instead, with no physical GPU needed.
+
+Inside either shell, create the OCaml 5.5.1 switch as above, then run:
+
+```sh
+opam install . --deps-only --with-test --with-doc --assume-depexts
+dune exec scripts/fetch_wgpu_native.exe
+dune build @runtest @gpu
+```
+
+`--assume-depexts` tells opam that Nix already supplies the system libraries.
+The flake does not install a different OCaml or wgpu-native version: those
+remain managed by opam and our pinned downloader. See the
+[Nix guide](docs/GUIDE.md#nix--nixos) for first-time setup.
+
 ## Two layers
 
 **The raw layer** mirrors `webgpu.h` and `wgpu.h` one for one — same entry
