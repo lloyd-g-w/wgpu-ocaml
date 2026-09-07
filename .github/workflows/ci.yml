@@ -112,7 +112,8 @@ jobs:
         run: vulkaninfo --summary
 
       # test_device, test_compute (exact numerical readback), test_render
-      # (exact pixel readback), test_errors, test_gc_lifetime.
+      # (exact pixel readback), test_errors, test_gc_lifetime,
+      # test_callback_safety.
       - name: GPU tests (dune build @gpu)
         run: opam exec -- dune build -j 2 @gpu
 

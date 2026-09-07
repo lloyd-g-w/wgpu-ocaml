@@ -9,7 +9,8 @@
    This module therefore offers exactly three mechanisms:
 
    - {!permanent}: a closure that is retained for the lifetime of the process.
-     Used for the handful of trampolines the ergonomic layer installs once.
+     Used for trampolines a program installs once, such as the uncaptured-error
+     handler or the ones in [wgpu.utils].
    - {!Userdata}: a table mapping the [userdata1] pointer that WebGPU passes
      back to the OCaml value it stands for, so that a *single* permanent
      trampoline can serve an unbounded number of per-call closures.
@@ -48,8 +49,8 @@
    An OCaml exception escaping a libffi closure would unwind through Rust
    frames that hold locks, which is undefined behaviour.  {!protect} catches
    everything, records it (see {!take_failures}) and returns normally; the
-   ergonomic layer re-raises the recorded failures on the next OCaml-side
-   checkpoint, so nothing is silently swallowed. *)
+   caller collects the recorded failures with {!take_failures}, so nothing is
+   silently swallowed. *)
 
 (* One mutex for every piece of mutable state this library shares with
    callbacks.  A single lock cannot deadlock against itself, and OCaml's

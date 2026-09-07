@@ -5,7 +5,8 @@
 
 This is the contract between the generator (`gen/`), the vendored headers
 (`vendor/`), the hand-written runtime (`lib/wgpu_loader.ml`,
-`lib/wgpu_callback.ml`, `lib/wgpu_api.ml`), the tests and the examples.
+`lib/wgpu_callback.ml`), the separate `wgpu.utils` library (`utils/`), the
+tests and the examples.
 **If you change an interface described here, update this file in the same
 change.**
 
@@ -24,15 +25,21 @@ Goals:
   `ctypes-foreign`.
 * Load `libwgpu_native` dynamically at run time (`Dl.dlopen`). No C stubs,
   no headers at build time, no linker flags.
-* Add a **small** ergonomic layer with explicit lifetimes, enough to write
-  headless compute and offscreen rendering without touching ctypes.
 * Prove the binding against the real ABI (a C probe compiled from the
   vendored headers) and against a real GPU (lavapipe).
+* Ship, **as a separate library**, only the handful of helpers that nearly
+  every program has to write anyway and that the other wgpu-native bindings
+  (WebGPU-C++, `wgpu_native_zig`, `wgpu-odin`, Silk.NET) also ship (§4).
 
 Non-goals (deliberately, to keep this a simpler sibling of `ocaml-vulkan`):
 
-* No windowing, surface or swapchain helpers in the ergonomic layer
-  (the raw surface entry points are all bound; see §9).
+* **No ergonomic layer.** The `wgpu` library is raw bindings only: no
+  descriptor builders, no exception-based error handling, no arena, no
+  logging wrapper, no `with_*` scoping helpers. `Wgpu.Callback` is not an
+  exception to this rule — it is the only *correct* way to build the function
+  pointer a WebGPU descriptor wants (§5).
+* No windowing, surface or swapchain helpers (the raw surface entry points are
+  all bound).
 * No async/effects/Lwt integration. WebGPU's async calls are driven by
   polling, which is what wgpu-native itself does (§5).
 * No attempt to support several wgpu-native versions at once. One pin,
@@ -60,8 +67,8 @@ lib/generated/wgpu_abi.ml    generated: the ABI/defaults dump used by test/abi
 lib/wgpu_loader.ml           dlopen, search path, version gate, diagnostics
 lib/wgpu_callback.ml         closure lifetime, thread/lock policy, exception
                              barrier for C callbacks
-lib/wgpu_api.ml              the ergonomic layer
 lib/wgpu.ml                  the public module: re-exports the above
+utils/wgpu_utils.ml          the separate `wgpu.utils` library (§4)
 scripts/sha256.ml            SHA-256 (stdlib only), used by the fetcher and tests
 scripts/fetch_wgpu_native.ml pinned, checksummed installer for libwgpu_native
 test/unit/                   no GPU, no libwgpu_native, no C compiler
@@ -78,7 +85,7 @@ docs/GUIDE.md                the example-driven guide
 .github/workflows/           ci.yml (build/test/GPU) and docs.yml (Pages)
 ```
 
-## 3. The raw layer (generated)
+## 3. The bindings (generated)
 
 ### 3.1 Naming
 
@@ -149,33 +156,41 @@ tests link against the library with no `libwgpu_native` present.
 
 `Wgpu.Fn.names` lists every bound entry point in header order.
 
-## 4. The ergonomic layer (`lib/wgpu_api.ml`, re-exported by `Wgpu`)
+## 4. `wgpu.utils` (`utils/wgpu_utils.ml`, module `Wgpu_utils`)
 
-Principles:
+A **separate dune library** — a program that does not want it never links it —
+under a single admission rule:
 
-* **Explicit lifetimes.** Every `create`/`request` has a matching `release`
-  (and `destroy` where WebGPU has one). No finalisers are installed: a GPU
-  handle released by the OCaml GC at an unpredictable moment is worse than a
-  leak, and WebGPU's reference counting is already explicit. `with_instance`
-  wraps `Fun.protect` for the one case where it is unambiguous.
-* **Arenas for descriptors.** A C descriptor is a tree of pointers into memory
-  ctypes owns. `Arena` holds every allocation alive until after the foreign
-  call (`Arena.finish` uses `Sys.opaque_identity`). This is the invariant that
-  `test/gpu/test_gc_lifetime.ml` exercises.
-* **Errors become exceptions.** `Wgpu.Error of string`. Each device carries an
-  error sink fed by its uncaptured-error callback; every constructor checks it
-  after the call, and null handles raise. Error scopes are available as
-  `Device.with_error_scope`, which propagates the caller's exception unchanged
-  if the body raises. Exceptions raised *inside* a callback are recorded and
-  re-raised at the next checkpoint (§5.2).
-* **No hiding.** The ergonomic layer never wraps handles in a new type: its
-  types *are* the raw handle types, so any raw entry point can be applied to
-  them.
+> a helper belongs in `wgpu.utils` only if nearly every program has to write it
+> anyway **and** the other wgpu-native bindings ship it too.
 
-Covered today: `Log`, `Instance`, `Adapter`, `Device`, `Queue`, `Buffer`,
-`Command_encoder`, `Compute_pass`, `Render_pass`, `Texture`, `Shader_module`,
-`Compute_pipeline`, `Render_pipeline`, `Bind_group`, `Command_buffer`.
-See §9 for what is deliberately raw-only.
+That rule admits exactly three things, and the file is capped at ~200 lines to
+keep it that way:
+
+| | why it qualifies |
+|---|---|
+| `Sync.request_adapter`, `Sync.request_device` | nothing can be done before them, and the handle only comes back through a C callback plus a `userdata` pointer |
+| `Buffer.map_read_sync`, `Buffer.read_bytes` | the one genuinely asynchronous operation of every headless program; it only settles from `wgpuDevicePoll`, and the failure path is subtle (§5.3) |
+| `String_view.to_string`, `String_view.of_string` | every program reads a `WGPUStringView` and writes one |
+
+Rules:
+
+* **Results, not exceptions.** Every fallible function returns
+  `('a, status * string) result`.
+* **No new types.** The arguments and results are the raw handle types, so
+  everything mixes freely with `Wgpu.Fn`.
+* **The caller still owns memory.** `String_view.of_string` returns the view
+  *and* the value that owns the bytes it points at; keeping that second
+  component alive across the foreign call is documented as the caller's job.
+* **Explicit lifetimes everywhere.** No finalisers are installed anywhere in
+  this project: a GPU handle released by the OCaml GC at an unpredictable
+  moment is worse than a leak, and WebGPU's reference counting is already
+  explicit.
+
+What is deliberately *not* here: descriptor builders, an error sink or any
+exception type, error scopes, a logging wrapper, an arena, `with_*` scoping
+helpers, adapter enumeration. Those are all a few lines of `Wgpu.Fn` +
+`Wgpu.Types` at the call site, and `examples/` shows them written out.
 
 ## 5. Callbacks, threads and the GC
 
@@ -196,7 +211,8 @@ This is the load-bearing design decision, so the reasoning is recorded here.
   `Ctypes.static_funptr` (a plain pointer, no lifetime magic) and
   `Wgpu_callback` provides the only two safe ways to obtain one:
   * `Wgpu_callback.permanent` — retains the closure for the life of the
-    process. Used for the handful of trampolines the ergonomic layer installs.
+    process. Used for trampolines installed once: the uncaptured-error handler
+    an application installs, and the three in `wgpu.utils`.
   * `Wgpu_callback.Userdata` — a token table addressed by the `void *userdata1`
     WebGPU hands back, so a *single* permanent trampoline can serve unbounded
     per-call closures. Tokens are released after the callback has fired;
@@ -231,11 +247,10 @@ So the bindings support foreign threads instead of assuming they do not exist:
   a TLS destructor so the thread is unregistered when it exits;
 * ctypes refuses to release the lock for a signature that passes OCaml heap
   memory (`ocaml_string`/`ocaml_bytes`); no generated signature does, and the
-  binding would raise `Ctypes.Unsupported` if one ever did. Everything the
-  arena passes to C is ctypes-managed `malloc` memory, which the GC never
-  moves;
+  binding would raise `Ctypes.Unsupported` if one ever did. Everything passed
+  to C is ctypes-managed `malloc` memory, which the GC never moves;
 * all state shared between callbacks and the main thread (the retained-closure
-  list, the userdata table, the per-device error sink, the log handler) is
+  list, the userdata table, the recorded callback failures) is
   guarded by the single mutex in `Wgpu_callback`. `Mutex.lock` releases the
   domain lock while it waits, so a callback blocking on it cannot stop the
   main thread. One mutex, taken for short pure-OCaml critical sections only,
@@ -250,8 +265,9 @@ explicitly rather than relying on those transitive dependencies, and
 throughout the public API.
 
 This is verified, not asserted: `test/thread/` builds a C fixture that spawns
-a real pthread and calls OCaml back through exactly the closures the ergonomic
-layer installs — 200 plain callbacks that allocate and run `Gc.full_major`, a
+a real pthread and calls OCaml back through exactly the closures `wgpu.utils`
+and the examples install — 200 plain callbacks that allocate and run
+`Gc.full_major`, a
 `WGPUStringView`-shaped struct passed by value, callbacks concurrent with a
 busy OCaml thread and with another thread parked inside a native call, and
 survival across `Gc.compact`. The GPU tests then exercise the same closures
@@ -266,26 +282,27 @@ multi-domain safe.
 An OCaml exception escaping a libffi closure would unwind through Rust frames
 holding locks — undefined behaviour. Every trampoline body therefore runs
 inside `Wgpu_callback.protect ~where`, which catches everything and records it
-(bounded at 64 entries). The recorded failures are **not** swallowed: the
-ergonomic layer re-raises them as `Wgpu.Error` at the next checkpoint
-(`Device.check`, which every constructor calls, plus the synchronous request
-helpers), and `Wgpu.Callback.take_failures` exposes them directly.
+(bounded at 64 entries). The recorded failures are **not** swallowed:
+`Wgpu.Callback.take_failures` hands them to the caller and
+`Wgpu.Callback.pending_failures` counts them. Since there is no ergonomic
+layer to re-raise them at a checkpoint, collecting them is the application's
+job; `test/gpu/test_callback_safety.ml` shows the pattern.
 
 ### 5.3 Token lifetime on failure paths
 
-`wgpuInstanceRequestAdapter`, `wgpuAdapterRequestDevice` and
-`wgpuDevicePopErrorScope` answer *synchronously* in wgpu-native (its futures
-are stubs returning `NULL_FUTURE`), so their userdata tokens are freed with
+`wgpuInstanceRequestAdapter` and `wgpuAdapterRequestDevice` answer
+*synchronously* in wgpu-native (its futures are stubs returning
+`NULL_FUTURE`), so `Wgpu_utils.Sync` frees their userdata tokens with
 `Fun.protect` on every exit path.
 
 Buffer mapping is genuinely deferred, so the same trick would be a
-use-after-free waiting to happen. When the wait fails, `Buffer.map_read_sync`
-instead **cancels** the mapping: `wgpuBufferUnmap` on a buffer whose map is
-still pending makes wgpu-core deliver the callback immediately with
-`MapAborted` (wgpu-core 29.0.3, `resource.rs`, `Buffer::unmap` /
-`unmap_inner`), after which the token is safe to free. If that somehow does
-not settle it, a bounded drain of eight polls follows, and only then is the
-token **abandoned** — kept forever and counted in
+use-after-free waiting to happen. When the polls run out,
+`Wgpu_utils.Buffer.map_read_sync` instead **cancels** the mapping:
+`wgpuBufferUnmap` on a buffer whose map is still pending makes wgpu-core
+deliver the callback immediately with `MapAborted` (wgpu-core 29.0.3,
+`resource.rs`, `Buffer::unmap` / `unmap_inner`), after which the token is safe
+to free. If that somehow does not settle it, a bounded drain of eight polls
+follows, and only then is the token **abandoned** — kept forever and counted in
 `Wgpu.Callback.Userdata.abandoned_count ()` — rather than freed while native
 code still holds the pointer. `test/gpu/test_callback_safety.ml` drives that
 path with `~max_polls:0` and asserts that nothing leaks and the buffer is
@@ -296,9 +313,9 @@ immediately reusable.
   wgpu-native is on the stack, then checks the mapped data).
 * `WGPUFuture`/`wgpuInstanceWaitAny` are **not** functional in wgpu-native
   v29 (`wgpuBufferMapAsync` returns a null future — see upstream
-  `src/lib.rs`, "TODO: Properly handle futures"). The ergonomic layer
-  therefore ignores futures and polls; the raw future entry points are bound
-  but should not be relied on.
+  `src/lib.rs`, "TODO: Properly handle futures"). `wgpu.utils` therefore
+  ignores futures and polls; the future entry points are bound but should not
+  be relied on.
 
 ## 6. Loading and the version gate (`lib/wgpu_loader.ml`)
 
@@ -385,20 +402,24 @@ Three tiers, deliberately separated so the cheap ones run anywhere.
 
 ### 7.2 `dune build @gpu` — needs libwgpu_native and an adapter
 
-`test/gpu/`: `test_device` (loader, version, adapter info, limits, features,
-enumeration), `test_compute` (exact numerical readback),
-`test_render` (exact pixel readback), `test_errors` (bad WGSL and an invalid
-buffer usage raise; the device stays usable; error scopes),
-`test_gc_lifetime` (compaction between calls, descriptor churn under
-`Gc.full_major`, and a full major collection *inside* a wgpu callback),
-`test_callback_safety` (an exception raised inside a real wgpu callback is
-delivered as `Wgpu.Error` instead of unwinding into Rust; a mapping that does
-not complete is cancelled with no leaked or abandoned token and leaves the
-buffer usable; a mapping wgpu *rejects* reports the callback status and the
-error sink together and leaves the device clean; a failure recorded before a
-constructor stops it before it allocates, and one recorded during it releases
-the handle exactly once; `with_error_scope` propagates the caller's
-exception).
+Every one of these drives the raw entry points directly, with `wgpu.utils` for
+the adapter/device requests and the buffer readback, and installs its own
+uncaptured-error callback so that "the device reported an error" is an
+assertion rather than a library feature.
+
+`test/gpu/` (71 checks on the reference lavapipe host; `test_device` has one
+check per enumerated adapter): `test_device` (loader, version, adapter info, limits,
+features, the two-call enumeration protocol), `test_compute` (exact numerical
+readback), `test_render` (exact pixel readback), `test_errors` (bad WGSL and an
+invalid buffer usage are reported through the uncaptured-error callback and the
+device stays usable), `test_gc_lifetime` (compaction between calls, descriptor
+churn under `Gc.full_major`, and a full major collection *inside* a wgpu
+callback), `test_callback_safety` (an exception raised inside a real wgpu
+callback is recorded by `Wgpu.Callback.protect` instead of unwinding into Rust;
+a mapping that does not complete is cancelled with no leaked or abandoned token
+and leaves the buffer usable; a mapping wgpu *rejects* reports its status
+through the map callback and its validation error through the uncaptured-error
+callback, and leaks nothing).
 
 Force the software rasteriser with
 `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json`.
@@ -451,13 +472,8 @@ Generated (complete for the pinned headers, verified by
 | sentinel `#define`s | 13 |
 | generated OCaml | ~15,500 lines |
 
-Not covered by the **ergonomic** layer (all reachable through `Wgpu.Fn` +
-`Wgpu.Types`): surfaces/swapchains and every windowing integration, render
-bundles, query sets and timestamps, samplers and texture sampling, vertex
-buffer layouts, depth/stencil state, blending, pipeline layouts and explicit
-bind group layouts, compute/render pipeline creation from SPIR-V, immediates,
-multi-draw, external textures, the Metal interop entry points, and adapter
-`WGPUInstanceExtras` beyond `backends`/`flags`.
+There is no second list of "what the wrapper covers": every entry point of the
+pinned headers is bound, and `wgpu.utils` wraps none of them (§4).
 
 Not usable at all in wgpu-native v29 (documented upstream limits, not binding
 gaps): `WGPUFuture`/`wgpuInstanceWaitAny` (§5), `wgpuGetProcAddress`, and the
@@ -466,8 +482,8 @@ process** when called (they are bound so callers can see them; `test_pin`
 keeps the list honest).
 
 Inherited from upstream, and documented rather than papered over:
-`Instance.enumerate_adapters` uses the two-call protocol
-`wgpuInstanceEnumerateAdapters` requires, which has no capacity argument. The
+`wgpuInstanceEnumerateAdapters` has a two-call protocol with no capacity
+argument, which `test/gpu/test_device.ml` exercises as a caller would. The
 filling call writes as many entries as the driver reports *at that moment*
 (`std::slice::from_raw_parts_mut(adapters, count)` in upstream `src/lib.rs`),
 and each call re-enumerates: wgpu-core 29.0.3 `Instance::enumerate_adapters`
@@ -476,8 +492,9 @@ walks the fixed `instance_per_backend` list and calls
 it created. Nothing is cached, so the count is only stable while the set of
 physical adapters is. Clamping the second count on the OCaml side would *not*
 be a fix — the native write happens before the count is returned — so the
-wrapper documents the precondition instead. The set of *backends* cannot
-change: it is fixed when the instance is created.
+caller has to live with the precondition instead — which is one reason
+enumeration is not in `wgpu.utils`. The set of *backends* cannot change: it is
+fixed when the instance is created.
 
 Platforms: developed and tested on Linux x86_64 against lavapipe. The pin
 carries checksums for linux-aarch64, macos-x86_64, macos-aarch64 and
@@ -490,11 +507,14 @@ representation assumes it).
 Done and green on Linux x86_64 / OCaml 5.5.1 / ctypes 0.24.0 / wgpu-native
 v29.0.1.1 (lavapipe):
 
-* `dune build` — library, generator, scripts, examples, tests.
+* `dune build` — libraries (`wgpu`, `wgpu.utils`), generator, scripts,
+  examples, tests.
 * `dune build @gen` — committed generated code is reproducible.
 * `dune test` — 145 checks across the unit, generator, site, loader and
   foreign-thread suites, plus the 1914-line ABI/defaults diff.
-* `dune build @gpu` — 76 checks across six GPU tests.
+* `dune build @gpu` — 71 checks across six GPU tests on the reference host
+  (device 16, compute 5, render 12, errors 10, gc lifetime 10, callback
+  safety 18; the device count varies with the number of enumerated adapters).
 * `dune exec examples/headless_compute.exe`, `…/offscreen_render.exe`.
 * `dune exec scripts/fetch_wgpu_native.exe` — checksummed install.
 * `opam install .` — the package installs into the switch.
@@ -530,7 +550,7 @@ Known gaps, in the order they should probably be closed:
 2. Non-Linux platforms are unexecuted (§9); CI runs Linux x86_64 only.
 3. Multi-domain use is unsupported: foreign callback threads register with
    domain 0 (§5.1).
-4. `Instance.enumerate_adapters` inherits an upstream two-call protocol whose
+4. `wgpuInstanceEnumerateAdapters` has an upstream two-call protocol whose
    soundness depends on the adapter set being stable (§9).
 5. **Licensing is deliberately unset.** `dune-project` has no `license:`
    field, so `wgpu.opam` has none either (`opam lint` reports exactly that one

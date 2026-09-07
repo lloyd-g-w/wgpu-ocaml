@@ -9,7 +9,7 @@
 (executables
  (names test_device test_compute test_render test_errors test_gc_lifetime
   test_callback_safety)
- (libraries wgpu ctypes))
+ (libraries wgpu wgpu.utils ctypes))
 
 (rule
  (alias gpu)

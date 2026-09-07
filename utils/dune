@@ -1,0 +1,8 @@
+; The separate, minimal utility library.  It is *not* part of `wgpu`: the
+; bindings themselves stay raw, and a program that does not want these three
+; helpers never links them.
+
+(library
+ (name wgpu_utils)
+ (public_name wgpu.utils)
+ (libraries wgpu ctypes ctypes.foreign))

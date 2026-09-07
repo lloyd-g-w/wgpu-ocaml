@@ -4,8 +4,8 @@
    sink is process-global and webgpu.h documents the uncaptured-error callback
    as callable from any thread).  This test proves the mechanism rather than
    asserting it: a C fixture spawns a real pthread and calls back into OCaml
-   through exactly the same {!Wgpu.Callback.permanent} closures the ergonomic
-   layer installs, including a struct passed by value.
+   through exactly the same {!Wgpu.Callback.permanent} closures [wgpu.utils]
+   and the examples install, including a struct passed by value.
 
    It needs a C compiler but no GPU and no libwgpu_native. *)
 
@@ -76,7 +76,7 @@ let () =
   let sv_cb =
     Wgpu.Callback.permanent sv_cb_fn (fun sv _ ->
         Wgpu.Callback.protect ~where:"probe struct callback" (fun () ->
-            got := Wgpu.string_of_view sv))
+            got := Wgpu_utils.String_view.to_string sv))
   in
   call_with_struct sv_cb "hello from a foreign thread" null;
   equal_string "struct-by-value argument on a foreign thread"

@@ -1,4 +1,10 @@
-(* A real compute dispatch with an exact numerical result. *)
+(* A real compute dispatch with an exact numerical result, built from raw
+   descriptors. *)
+
+module T = Wgpu.Types
+module F = Wgpu.Fn
+module U = Wgpu_utils
+module Check = Gpu_check
 
 let shader =
   {|
@@ -11,60 +17,68 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 |}
 
 let () =
-  let ((_, _, device, queue) as ctx) = Gpu_check.setup ~label:"compute-test" () in
+  let ((_, _, device, queue) as ctx) = Check.setup ~label:"compute-test" () in
   let input = [ 0; 1; 2; 3; 4; 5; 6; 7 ] in
   let expected = List.map (fun v -> (v * v) + 7) input in
   let size = 4 * List.length input in
 
   let storage =
-    Wgpu.Device.create_buffer device ~label:"storage" ~size
-      ~usage:Wgpu.Types.BufferUsage.(combine [ storage; copy_dst; copy_src ])
+    Check.create_buffer device ~label:"storage" ~size
+      ~usage:T.BufferUsage.(combine [ storage; copy_dst; copy_src ])
   in
   let staging =
-    Wgpu.Device.create_buffer device ~label:"staging" ~size
-      ~usage:Wgpu.Types.BufferUsage.(combine [ map_read; copy_dst ])
+    Check.create_buffer device ~label:"staging" ~size
+      ~usage:T.BufferUsage.(combine [ map_read; copy_dst ])
   in
-  Gpu_check.equal_int "buffer size" ~expected:size ~got:(Wgpu.Buffer.size storage);
+  Check.equal_int "buffer size" ~expected:size
+    ~got:(Unsigned.UInt64.to_int (F.wgpuBufferGetSize storage));
 
-  let module_ = Wgpu.Device.create_shader_module_wgsl device ~label:"square" shader in
+  let module_ = Check.create_shader_module device ~label:"square" shader in
   let pipeline =
-    Wgpu.Device.create_compute_pipeline device ~label:"square" ~shader_module:module_
+    Check.create_compute_pipeline device ~label:"square" ~module_ ~entry_point:"main"
   in
-  let layout = Wgpu.Compute_pipeline.bind_group_layout pipeline in
-  let bind_group =
-    Wgpu.Device.create_bind_group device ~layout
-      ~entries:[ Wgpu.Device.Buffer_binding { binding = 0; buffer = storage; offset = 0; size } ]
-  in
+  Check.is_true "the pipeline was created" (not (T.ComputePipeline.is_null pipeline));
+  let layout = F.wgpuComputePipelineGetBindGroupLayout pipeline (Check.u32 0) in
+  let bind_group = Check.create_storage_bind_group device ~layout ~buffer:storage ~size in
 
-  Wgpu.Queue.write_buffer queue storage (Gpu_check.bytes_of_u32 input);
-  let encoder = Wgpu.Device.create_command_encoder device in
-  let pass = Wgpu.Command_encoder.begin_compute_pass encoder in
-  Wgpu.Compute_pass.set_pipeline pass pipeline;
-  Wgpu.Compute_pass.set_bind_group pass bind_group;
+  Check.write_buffer queue storage (Check.bytes_of_u32 input);
+  let encoder_desc = T.CommandEncoderDescriptor.init () in
+  let encoder = F.wgpuDeviceCreateCommandEncoder device (Ctypes.addr encoder_desc) in
+  let pass_desc = T.ComputePassDescriptor.init () in
+  let pass = F.wgpuCommandEncoderBeginComputePass encoder (Ctypes.addr pass_desc) in
+  F.wgpuComputePassEncoderSetPipeline pass pipeline;
+  F.wgpuComputePassEncoderSetBindGroup pass (Check.u32 0) bind_group (Check.sz 0)
+    (Check.nullp Ctypes.uint32_t);
   (* workgroup_size(4) x 2 workgroups = the 8 elements *)
-  Wgpu.Compute_pass.dispatch_workgroups pass 2;
-  Wgpu.Compute_pass.finish pass;
-  Wgpu.Compute_pass.release pass;
-  Wgpu.Command_encoder.copy_buffer_to_buffer encoder ~src:storage ~src_offset:0 ~dst:staging
-    ~dst_offset:0 ~size;
-  let commands = Wgpu.Command_encoder.finish encoder in
-  Wgpu.Queue.submit queue [ commands ];
-  Wgpu.Device.check device;
+  F.wgpuComputePassEncoderDispatchWorkgroups pass (Check.u32 2) (Check.u32 1) (Check.u32 1);
+  F.wgpuComputePassEncoderEnd pass;
+  F.wgpuComputePassEncoderRelease pass;
+  F.wgpuCommandEncoderCopyBufferToBuffer encoder storage (Check.u64 0) staging (Check.u64 0)
+    (Check.u64 size);
+  let commands_desc = T.CommandBufferDescriptor.init () in
+  let commands = F.wgpuCommandEncoderFinish encoder (Ctypes.addr commands_desc) in
+  Check.submit queue commands;
 
-  let got = Gpu_check.u32_of_bytes (Wgpu.Buffer.read_sync ~device staging ~offset:0 ~size) in
-  Gpu_check.equal_int_list "compute result" ~expected ~got;
+  (match U.Buffer.read_bytes device staging ~offset:0 ~size with
+  | Ok bytes -> Check.equal_int_list "compute result" ~expected ~got:(Check.u32_of_bytes bytes)
+  | Error (s, m) ->
+      Check.is_true
+        (Printf.sprintf "readback failed: %s (%s)" (T.MapAsyncStatus.to_string s) m)
+        false);
 
+  Check.equal_int "the device reported no errors" ~expected:0
+    ~got:(List.length (Check.take_errors ()));
   (* Mapping tokens must not leak. *)
-  Gpu_check.equal_int "no live callback tokens" ~expected:0
+  Check.equal_int "no live callback tokens" ~expected:0
     ~got:(Wgpu.Callback.Userdata.live_count ());
 
-  Wgpu.Command_buffer.release commands;
-  Wgpu.Command_encoder.release encoder;
-  Wgpu.Bind_group.release bind_group;
-  Wgpu.Bind_group.release_layout layout;
-  Wgpu.Compute_pipeline.release pipeline;
-  Wgpu.Shader_module.release module_;
-  Wgpu.Buffer.release staging;
-  Wgpu.Buffer.release storage;
-  Gpu_check.teardown ctx;
-  Gpu_check.finish "compute"
+  F.wgpuCommandBufferRelease commands;
+  F.wgpuCommandEncoderRelease encoder;
+  F.wgpuBindGroupRelease bind_group;
+  F.wgpuBindGroupLayoutRelease layout;
+  F.wgpuComputePipelineRelease pipeline;
+  F.wgpuShaderModuleRelease module_;
+  F.wgpuBufferRelease staging;
+  F.wgpuBufferRelease storage;
+  Check.teardown ctx;
+  Check.finish "compute"

@@ -4,4 +4,4 @@
 
 (executables
  (names headless_compute offscreen_render)
- (libraries wgpu))
+ (libraries wgpu wgpu.utils ctypes))

@@ -3,7 +3,7 @@
 
 (executable
  (name test_foreign_thread_callbacks)
- (libraries wgpu ctypes ctypes.foreign threads.posix))
+ (libraries wgpu wgpu.utils ctypes ctypes.foreign threads.posix))
 
 (rule
  (targets libforeign_thread_probe.so)

@@ -1,10 +1,15 @@
 # wgpu-ocaml guide
 
 A practical, example-driven tour of the bindings: how to install the native
-library, what the two layers look like, and how to write headless compute and
-offscreen rendering with them. [`DESIGN.md`](../DESIGN.md) is the authoritative
+library, what the raw surface looks like, and how to write headless compute and
+offscreen rendering with it. [`DESIGN.md`](../DESIGN.md) is the authoritative
 *contract* between the generator, the runtime and the tests; this guide is the
 reader-friendly walkthrough of the same material.
+
+These are **raw bindings**. `Wgpu.Types` and `Wgpu.Fn` mirror `webgpu.h` and
+`wgpu.h` and add nothing to them; the three helpers no program can avoid
+writing live in a separate `wgpu.utils` library. There is no ergonomic
+wrapper, so there is also no coverage list to check your idea against.
 
 > **Note:** this guide, like every other original file in this repository, was
 > written by AI agents — see
@@ -173,60 +178,86 @@ things to know:
 If you try it, `dune build @runtest` (no GPU needed) is the quickest way to
 find out; please report the result.
 
-## The two layers
+## The library
 
 Everything is reachable through the single module `Wgpu`.
-
-**The raw layer** is generated from the vendored headers and mirrors them one
-for one — same entry point names, same struct field spellings, same enum
-values, same defaults:
 
 * `Wgpu.Types` — 114 structs, 70 enums, 8 bit sets, 23 opaque handles, 214
   function-pointer typedefs, 13 sentinel constants.
 * `Wgpu.Fn` — 228 entry points, each under its exact C name.
+* `Wgpu.Loader`, `Wgpu.Pin`, `Wgpu.Abi` — the loader, the pin metadata and the
+  layout dump the ABI test uses.
+* `Wgpu.Callback` — the only correct way to obtain the C function pointer a
+  WebGPU descriptor wants. See
+  [Callbacks, polling and threads](#callbacks-polling-and-threads); it is a
+  correctness requirement, not a convenience, because `ctypes` frees the libffi
+  closure behind a `Foreign.funptr` as soon as the OCaml value owning it is
+  collected.
 
-**The ergonomic layer** is small, hand written, and owns lifetimes explicitly:
-`Wgpu.Instance`, `Adapter`, `Device`, `Queue`, `Buffer`, `Command_encoder`,
-`Compute_pass`, `Render_pass`, `Texture`, `Shader_module`, `Compute_pipeline`,
-`Render_pipeline`, `Bind_group`, `Command_buffer`, `Log`.
+That is the whole library: no wrappers, no renaming, nothing hidden. The names
+you read in `webgpu.h` are the names you type in OCaml, so the headers stay
+greppable — and there is no coverage list to check an idea against, because
+every entry point of the pinned headers is bound.
 
-The two layers share the same handle types — the ergonomic layer never wraps a
-handle in a new type — so you can always drop down to `Wgpu.Fn` for anything it
-does not cover, on the very same values. That is the whole design: a complete
-raw surface, plus a thin convenience layer that never gets in the way.
+## `wgpu.utils`
+
+A **separate** library, so a program that does not want it never links it, with
+one admission rule: a helper belongs there only if nearly every program has to
+write it anyway *and* the other wgpu-native bindings ship it too. Today that is
+exactly three things, in about 200 lines:
+
+| module | what it is | why it qualifies |
+|---|---|---|
+| `Wgpu_utils.Sync` | `request_adapter`, `request_device` | nothing can happen before them, and the handle only comes back through a C callback plus a `userdata` pointer |
+| `Wgpu_utils.Buffer` | `map_read_sync`, `read_bytes` | the one genuinely asynchronous operation of every headless program; it settles only from `wgpuDevicePoll` |
+| `Wgpu_utils.String_view` | `to_string`, `of_string` | every program reads a `WGPUStringView` and writes one |
+
+Everything fallible returns a `result`, never an exception, and the handles are
+the raw handle types. There are no descriptor builders, no error sink, no
+logging wrapper and no arena. Depend on it from your `dune` with
+
+```
+(libraries wgpu wgpu.utils)
+```
 
 ## Your first program
 
 ```ocaml
-open Wgpu
+module T = Wgpu.Types
+module F = Wgpu.Fn
+module U = Wgpu_utils
 
 let () =
-  Log.to_stderr ~level:Types.LogLevel.warn ();
-  Printf.printf "wgpu-native %s (bindings pinned at %s)\n" (runtime_version ()) pinned_version;
-  let instance = Instance.create () in
-  let adapter = Instance.request_adapter instance in
-  let info = Adapter.info adapter in
-  print_endline (Adapter.string_of_info info);
-  Adapter.release adapter;
-  Instance.release instance
+  Printf.printf "wgpu-native %s (bindings pinned at %s)\n"
+    (Wgpu.Loader.runtime_version ()) Wgpu.Pin.version;
+  let instance = F.wgpuCreateInstance (Ctypes.from_voidp T.InstanceDescriptor.t Ctypes.null) in
+  match U.Sync.request_adapter instance with
+  | Error (status, msg) ->
+      Printf.eprintf "no adapter: %s (%s)\n" (T.RequestAdapterStatus.to_string status) msg
+  | Ok adapter ->
+      let info = T.AdapterInfo.init () in
+      if F.wgpuAdapterGetInfo adapter (Ctypes.addr info) = T.Status.success then
+        Printf.printf "%s (%s, backend %s)\n"
+          (U.String_view.to_string (Ctypes.getf info T.AdapterInfo.device))
+          (U.String_view.to_string (Ctypes.getf info T.AdapterInfo.vendor))
+          (T.BackendType.to_string (Ctypes.getf info T.AdapterInfo.backendType));
+      F.wgpuAdapterInfoFreeMembers info;      (* the strings are owned by wgpu *)
+      F.wgpuAdapterRelease adapter;
+      F.wgpuInstanceRelease instance
 ```
 
 On lavapipe this prints:
 
 ```
 wgpu-native 29.0.1.1 (bindings pinned at 29.0.1.1)
-llvmpipe (LLVM 20.1.2, 128 bits) (llvmpipe, , backend WGPUBackendType_Vulkan, type WGPUAdapterType_CPU, vendor 0x10005 device 0x0000)
+llvmpipe (LLVM 20.1.2, 128 bits) (llvmpipe, backend WGPUBackendType_Vulkan)
 ```
 
-`Adapter.info` returns a record with `vendor`, `architecture`, `device`,
-`description`, `backend_type`, `adapter_type`, `vendor_id` and `device_id`;
-`Adapter.string_of_info` is the one-line rendering above.
-
-`Instance.request_adapter` takes optional `?power_preference`,
-`?force_fallback_adapter`, `?backend_type` and `?compatible_surface`
-arguments, and `Instance.enumerate_adapters` (a wgpu-native extension) lists
-every adapter the instance can see — the caller owns and must release each of
-them.
+`Sync.request_adapter` takes an optional `?options:RequestAdapterOptions.t`
+(build it with `init ()` and `Ctypes.setf` to ask for a power preference, a
+backend or a compatible surface). `wgpuInstanceEnumerateAdapters`, the
+wgpu-native extension that lists every adapter, is a plain `Wgpu.Fn` call with
+a two-call protocol; `test/gpu/test_device.ml` shows it written out.
 
 ## Lifetimes
 
@@ -236,65 +267,62 @@ the OCaml GC at an unpredictable moment is worse than a leak, and WebGPU's
 reference counting is already explicit.
 
 ```ocaml
-let device = Adapter.request_device ~label:"demo" adapter in
+let device = Result.get_ok (Wgpu_utils.Sync.request_device adapter) in
 ...
-Device.release device
+Wgpu.Fn.wgpuDeviceRelease device
 ```
 
-For the one case where scoping is unambiguous there is a wrapper:
+Handles that WebGPU also lets you *destroy* (`wgpuDeviceDestroy`,
+`wgpuBufferDestroy`, `wgpuTextureDestroy`) have both operations: destroy frees
+the underlying GPU resource immediately, release drops your reference.
 
-```ocaml
-Instance.with_instance (fun instance ->
-    (* ... *)
-    ())
-```
-
-Handles that WebGPU also lets you *destroy* (`Device`, `Buffer`, `Texture`)
-have both operations: `destroy` frees the underlying GPU resource immediately,
-`release` drops your reference.
-
-Descriptors are a different problem: a C descriptor is a tree of pointers into
-memory `ctypes` owns, and the OCaml values holding the sub-allocations must
-stay reachable until the foreign call returns. The ergonomic layer solves this
-with an arena that roots every allocation across the call
-(`Arena.finish` ends with `Sys.opaque_identity`), which is what
+Descriptors are the other half of the problem: a C descriptor is a tree of
+pointers into memory `ctypes` owns, and the OCaml values holding the
+sub-allocations must stay reachable until the foreign call returns. You own
+that invariant — see
+[Descriptors and chained structs](#descriptors-and-chained-structs). It is what
 `test/gpu/test_gc_lifetime.ml` hammers: descriptor churn with `Gc.full_major`
 around each cycle, and a full major collection *inside* a buffer-map callback
 while wgpu-native is on the stack.
-
-If you build descriptors yourself with the raw layer, you own that invariant —
-see [Dropping down to the raw layer](#dropping-down-to-the-raw-layer).
 
 ## Buffers and the queue
 
 ```ocaml
 let buffer =
-  Device.create_buffer device ~label:"data" ~size:32
-    ~usage:Types.BufferUsage.(combine [ storage; copy_dst; copy_src ])
+  let d = T.BufferDescriptor.init () in
+  Ctypes.setf d T.BufferDescriptor.usage
+    T.BufferUsage.(combine [ storage; copy_dst; copy_src ]);
+  Ctypes.setf d T.BufferDescriptor.size (Unsigned.UInt64.of_int 32);
+  F.wgpuDeviceCreateBuffer device (Ctypes.addr d)
 in
-Queue.write_buffer queue buffer (Bytes.make 32 '\000');
-Printf.printf "%d bytes, usage %s\n" (Buffer.size buffer)
-  (Types.BufferUsage.to_string (Buffer.usage buffer));
-Buffer.release buffer
+let data = Ctypes.CArray.of_string (String.make 32 '\000') in
+F.wgpuQueueWriteBuffer queue buffer (Unsigned.UInt64.of_int 0)
+  (Ctypes.to_voidp (Ctypes.CArray.start data)) (Unsigned.Size_t.of_int 32);
+ignore (Sys.opaque_identity data);          (* wgpu read it during the call *)
+Printf.printf "%d bytes, usage %s\n"
+  (Unsigned.UInt64.to_int (F.wgpuBufferGetSize buffer))
+  (T.BufferUsage.to_string (F.wgpuBufferGetUsage buffer));
+F.wgpuBufferRelease buffer
 ```
 
-Sizes and offsets are plain OCaml `int`s in the ergonomic layer (the raw layer
-uses `Unsigned.UInt64.t`, as the header does). `Queue.write_buffer` takes
-`Bytes.t` and an optional `?offset`.
+Sizes and offsets are `Unsigned.UInt64.t` / `Unsigned.Size_t.t`, exactly as the
+header declares them.
 
 Reading back is a two-step dance in WebGPU — the buffer must be mapped, and
-mapping completes asynchronously — so the ergonomic layer offers a blocking
+mapping completes asynchronously — which is why `wgpu.utils` has a blocking
 helper:
 
 ```ocaml
-let data = Buffer.read_sync ~device staging ~offset:0 ~size in   (* map, copy, unmap *)
+match Wgpu_utils.Buffer.read_bytes device staging ~offset:0 ~size with
+| Ok bytes -> ...                                  (* map, copy, unmap *)
+| Error (status, message) -> ...
 ```
 
 `Buffer.map_read_sync` maps and leaves the buffer mapped (call
-`Buffer.mapped_bytes`, then `Buffer.unmap` yourself) if you want the copy under
-your own control. Both drive the callback by calling `Device.poll ~wait:true`
-until it fires; see [Callbacks, polling and
-threads](#callbacks-polling-and-threads).
+`wgpuBufferGetConstMappedRange`, then `wgpuBufferUnmap` yourself) if you want
+the copy under your own control. Both drive the callback with
+`wgpuDevicePoll ~wait:true`, at most `?max_polls` times; see
+[Callbacks, polling and threads](#callbacks-polling-and-threads).
 
 A mapped-for-read buffer must have been created with
 `Types.BufferUsage.map_read` and can only be filled by a copy, so the usual
@@ -304,51 +332,59 @@ pattern is a storage buffer the GPU writes plus a staging buffer you map.
 
 WebGPU reports validation failures asynchronously through the device's
 uncaptured-error callback. In wgpu-native v29 it is invoked synchronously, on
-the thread that made the failing call, so the ergonomic layer collects the
-messages and turns them into exceptions:
+the thread that made the failing call — but nothing in these bindings collects
+those messages for you, so install the callback when you request the device:
 
 ```ocaml
-match Device.create_shader_module_wgsl device ~label:"bad" "not wgsl at all" with
-| module_ -> Shader_module.release module_
-| exception Wgpu.Error msg -> prerr_endline msg
+let uncaptured =
+  Wgpu.Callback.permanent T.UncapturedErrorCallback.fn (fun _device ty message _u1 _u2 ->
+      Wgpu.Callback.protect ~where:"uncaptured error callback" (fun () ->
+          Printf.eprintf "[wgpu %s] %s\n%!" (T.ErrorType.to_string ty)
+            (Wgpu_utils.String_view.to_string message)))
+
+let device =
+  let d = T.DeviceDescriptor.init () in
+  let uc = T.UncapturedErrorCallbackInfo.init () in
+  Ctypes.setf uc T.UncapturedErrorCallbackInfo.callback uncaptured;
+  Ctypes.setf d T.DeviceDescriptor.uncapturedErrorCallbackInfo uc;
+  Result.get_ok (Wgpu_utils.Sync.request_device ~descriptor:d adapter)
 ```
 
-which prints (lavapipe, wgpu-native v29):
+Compiling `"not wgsl at all"` then prints (lavapipe, wgpu-native v29):
 
 ```
-WGPUErrorType_Validation: Validation Error
+[wgpu WGPUErrorType_Validation] Validation Error
 
 Caused by:
   In wgpuDeviceCreateShaderModule, label = 'bad'
     ...
 ```
 
-The device stays usable afterwards. Three related entry points:
+The device stays usable afterwards. Three things worth knowing:
 
-* `Device.check device` — raise if anything was reported since the last check.
-  Every ergonomic constructor calls it for you; call it yourself after a raw
-  `Wgpu.Fn` call, or after `Queue.submit`.
-* `Device.with_error_scope device (fun () -> ...)` — pushes a WebGPU error
-  scope (`?filter`, default `ErrorFilter.validation`), runs the function, pops
-  the scope and raises `Wgpu.Error` if it captured anything. This is how
-  `test/gpu/test_errors.ml` catches an invalid buffer-usage combination.
-* `Device.lost device` — `Some reason` once the device has been lost.
+* A raw constructor tells you nothing but a possibly-null handle: check it with
+  `Wgpu.Types.ShaderModule.is_null` (and so on) and read the real reason off
+  the callback.
+* `wgpuDevicePushErrorScope` / `wgpuDevicePopErrorScope` are bound if you want
+  scoped capture instead of a global handler; the pop callback answers
+  synchronously in wgpu-native, so drive it exactly like
+  `Wgpu_utils.Sync.request_adapter` does.
+* `wgpuSetLogCallback` installs wgpu-native's own log sink (a *process-global*
+  Rust `log` sink). Install it the same way, with
+  `Wgpu.Callback.permanent T.LogCallback.fn`, and keep the handler cheap.
 
-`Wgpu.Error` is also raised when an entry point returns a null handle, with the
-name of the C function that returned it.
-
-Set `Log.to_stderr ~level:Types.LogLevel.warn ()` early to see wgpu-native's
-own log (or `Log.set ~level f` to route it somewhere else); the levels are
-`off`, `error`, `warn`, `info`, `debug`, `trace`.
 
 ## A compute pass end to end
 
 This is [`examples/headless_compute.ml`](../examples/headless_compute.ml)
 condensed. It runs `data[i] = data[i] * 2 + 1` over eight `u32`s and reads the
-result back.
+result back. Read it next to wgpu-native's own `examples/compute/main.c`: it is
+the same program, statement for statement.
 
 ```ocaml
-open Wgpu
+module T = Wgpu.Types
+module F = Wgpu.Fn
+module U = Wgpu_utils
 
 let shader = {|
 @group(0) @binding(0) var<storage, read_write> data: array<u32>;
@@ -359,132 +395,200 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 |}
 
-let () =
-  let instance = Instance.create () in
-  let adapter = Instance.request_adapter instance in
-  let device = Adapter.request_device ~label:"compute" adapter in
-  let queue = Device.queue device in
+let u32 = Unsigned.UInt32.of_int
+let u64 = Unsigned.UInt64.of_int
+let sz = Unsigned.Size_t.of_int
 
+(* A WGPUStringView points at memory we own, so every copy is kept here until
+   the end of the program. *)
+let owned = ref []
+
+let sv s =
+  let view, keepalive = U.String_view.of_string s in
+  owned := keepalive :: !owned;
+  view
+
+let () =
+  let instance = F.wgpuCreateInstance (Ctypes.from_voidp T.InstanceDescriptor.t Ctypes.null) in
+  let adapter = Result.get_ok (U.Sync.request_adapter instance) in
+  let device = Result.get_ok (U.Sync.request_device adapter) in
+  let queue = F.wgpuDeviceGetQueue device in
   let size = 32 in
+
   let storage =
-    Device.create_buffer device ~label:"storage" ~size
-      ~usage:Types.BufferUsage.(combine [ storage; copy_dst; copy_src ])
+    let d = T.BufferDescriptor.init () in
+    Ctypes.setf d T.BufferDescriptor.label (sv "storage");
+    Ctypes.setf d T.BufferDescriptor.usage
+      T.BufferUsage.(combine [ storage; copy_dst; copy_src ]);
+    Ctypes.setf d T.BufferDescriptor.size (u64 size);
+    F.wgpuDeviceCreateBuffer device (Ctypes.addr d)
   in
   let staging =
-    Device.create_buffer device ~label:"staging" ~size
-      ~usage:Types.BufferUsage.(combine [ map_read; copy_dst ])
+    let d = T.BufferDescriptor.init () in
+    Ctypes.setf d T.BufferDescriptor.label (sv "staging");
+    Ctypes.setf d T.BufferDescriptor.usage T.BufferUsage.(combine [ map_read; copy_dst ]);
+    Ctypes.setf d T.BufferDescriptor.size (u64 size);
+    F.wgpuDeviceCreateBuffer device (Ctypes.addr d)
   in
 
-  let module_ = Device.create_shader_module_wgsl device ~label:"double" shader in
-  let pipeline =
-    Device.create_compute_pipeline device ~label:"double" ~shader_module:module_
-      ~entry_point:"main"
-  in
-  let layout = Compute_pipeline.bind_group_layout pipeline in
-  let bind_group =
-    Device.create_bind_group device ~label:"data" ~layout
-      ~entries:[ Device.Buffer_binding { binding = 0; buffer = storage; offset = 0; size } ]
-  in
+  (* WGSL source is a chained extension struct; init () has already set its
+     chain.sType. *)
+  let wgsl = T.ShaderSourceWGSL.init () in
+  Ctypes.setf wgsl T.ShaderSourceWGSL.code (sv shader);
+  let module_desc = T.ShaderModuleDescriptor.init () in
+  Ctypes.setf module_desc T.ShaderModuleDescriptor.nextInChain
+    (Ctypes.coerce (Ctypes.ptr T.ShaderSourceWGSL.t) (Ctypes.ptr T.ChainedStruct.t)
+       (Ctypes.addr wgsl));
+  let module_ = F.wgpuDeviceCreateShaderModule device (Ctypes.addr module_desc) in
 
-  Queue.write_buffer queue storage (Bytes.make size '\001');
+  let compute = T.ComputeState.init () in
+  Ctypes.setf compute T.ComputeState.module_ module_;
+  Ctypes.setf compute T.ComputeState.entryPoint (sv "main");
+  let pipeline_desc = T.ComputePipelineDescriptor.init () in
+  Ctypes.setf pipeline_desc T.ComputePipelineDescriptor.compute compute;
+  (* no .layout: wgpu derives the bind group layout from the shader *)
+  let pipeline = F.wgpuDeviceCreateComputePipeline device (Ctypes.addr pipeline_desc) in
+  let layout = F.wgpuComputePipelineGetBindGroupLayout pipeline (u32 0) in
 
-  let encoder = Device.create_command_encoder device ~label:"compute" in
-  let pass = Command_encoder.begin_compute_pass encoder ~label:"double" in
-  Compute_pass.set_pipeline pass pipeline;
-  Compute_pass.set_bind_group pass bind_group;
-  Compute_pass.dispatch_workgroups pass 8;
-  Compute_pass.finish pass;
-  Compute_pass.release pass;
-  Command_encoder.copy_buffer_to_buffer encoder ~src:storage ~src_offset:0 ~dst:staging
-    ~dst_offset:0 ~size;
-  let commands = Command_encoder.finish encoder ~label:"compute" in
-  Queue.submit queue [ commands ];
-  Device.check device;
+  let entry = T.BindGroupEntry.init () in
+  Ctypes.setf entry T.BindGroupEntry.binding (u32 0);
+  Ctypes.setf entry T.BindGroupEntry.buffer storage;
+  Ctypes.setf entry T.BindGroupEntry.size (u64 size);
+  let bind_group_desc = T.BindGroupDescriptor.init () in
+  Ctypes.setf bind_group_desc T.BindGroupDescriptor.layout layout;
+  Ctypes.setf bind_group_desc T.BindGroupDescriptor.entryCount (sz 1);
+  Ctypes.setf bind_group_desc T.BindGroupDescriptor.entries (Ctypes.addr entry);
+  let bind_group = F.wgpuDeviceCreateBindGroup device (Ctypes.addr bind_group_desc) in
 
-  let result = Buffer.read_sync ~device staging ~offset:0 ~size in
-  Printf.printf "%d bytes back\n" (Bytes.length result);
+  let data = Ctypes.CArray.of_string (String.make size '\001') in
+  F.wgpuQueueWriteBuffer queue storage (u64 0)
+    (Ctypes.to_voidp (Ctypes.CArray.start data)) (sz size);
+  ignore (Sys.opaque_identity data);
 
-  Command_buffer.release commands;
-  Command_encoder.release encoder;
-  Bind_group.release bind_group;
-  Bind_group.release_layout layout;
-  Compute_pipeline.release pipeline;
-  Shader_module.release module_;
-  Buffer.release staging;
-  Buffer.release storage;
-  Queue.release queue;
-  Device.release device;
-  Adapter.release adapter;
-  Instance.release instance
+  let encoder_desc = T.CommandEncoderDescriptor.init () in
+  let encoder = F.wgpuDeviceCreateCommandEncoder device (Ctypes.addr encoder_desc) in
+  let pass_desc = T.ComputePassDescriptor.init () in
+  let pass = F.wgpuCommandEncoderBeginComputePass encoder (Ctypes.addr pass_desc) in
+  F.wgpuComputePassEncoderSetPipeline pass pipeline;
+  F.wgpuComputePassEncoderSetBindGroup pass (u32 0) bind_group (sz 0)
+    (Ctypes.from_voidp Ctypes.uint32_t Ctypes.null);
+  F.wgpuComputePassEncoderDispatchWorkgroups pass (u32 8) (u32 1) (u32 1);
+  F.wgpuComputePassEncoderEnd pass;
+  F.wgpuComputePassEncoderRelease pass;
+  F.wgpuCommandEncoderCopyBufferToBuffer encoder storage (u64 0) staging (u64 0) (u64 size);
+  let commands_desc = T.CommandBufferDescriptor.init () in
+  let commands = F.wgpuCommandEncoderFinish encoder (Ctypes.addr commands_desc) in
+  let submitted = Ctypes.CArray.of_list T.CommandBuffer.t [ commands ] in
+  F.wgpuQueueSubmit queue (sz 1) (Ctypes.CArray.start submitted);
+  ignore (Sys.opaque_identity submitted);
+
+  (match U.Buffer.read_bytes device staging ~offset:0 ~size with
+  | Ok result -> Printf.printf "%d bytes back\n" (Bytes.length result)
+  | Error (status, msg) ->
+      Printf.eprintf "readback failed: %s (%s)\n" (T.MapAsyncStatus.to_string status) msg);
+
+  F.wgpuCommandBufferRelease commands;
+  F.wgpuCommandEncoderRelease encoder;
+  F.wgpuBindGroupRelease bind_group;
+  F.wgpuBindGroupLayoutRelease layout;
+  F.wgpuComputePipelineRelease pipeline;
+  F.wgpuShaderModuleRelease module_;
+  F.wgpuBufferRelease staging;
+  F.wgpuBufferRelease storage;
+  F.wgpuQueueRelease queue;
+  F.wgpuDeviceRelease device;
+  F.wgpuAdapterRelease adapter;
+  F.wgpuInstanceRelease instance;
+  ignore (Sys.opaque_identity !owned)
 ```
 
 Points worth noting:
 
-* `Device.create_compute_pipeline` takes `~shader_module` and an
-  `?entry_point` (default `"main"`) and, with no `?layout`, lets wgpu derive
-  the bind group layout from the shader — which you then read back with
-  `Compute_pipeline.bind_group_layout` (and must release).
-* Bind group entries are a variant: `Device.Buffer_binding`,
-  `Device.Texture_view_binding`, `Device.Sampler_binding`.
-* `Compute_pass.set_bind_group` takes an optional `?index` (default 0) and
-  passes no dynamic offsets; use `Wgpu.Fn.wgpuComputePassEncoderSetBindGroup`
-  directly if you need them.
-* `Compute_pass.finish` is `wgpuComputePassEncoderEnd`; the pass encoder still
-  has to be released.
-* `Device.check` after `Queue.submit` surfaces validation errors raised during
-  submission.
+* Leaving `ComputePipelineDescriptor.layout` at its `init ()` default (NULL)
+  makes wgpu derive the bind group layout from the shader; you then read it
+  back with `wgpuComputePipelineGetBindGroupLayout` and must release it.
+* Every array a descriptor points at — the bind group entries, the submitted
+  command buffers — is a pointer plus a count, and the OCaml value behind the
+  pointer has to outlive the call.
+* `wgpuComputePassEncoderEnd` ends the pass; the pass encoder still has to be
+  released.
+* Nothing here checks for errors: install the uncaptured-error callback shown
+  in [Errors](#errors), and check the handles for null.
 
 ## An offscreen render pass
 
 [`examples/offscreen_render.ml`](../examples/offscreen_render.ml) draws a
 triangle into an RGBA8 texture, copies it into a buffer and prints an ASCII
-view of the result. No window, no surface, no swapchain — the ergonomic layer
-deliberately has no windowing support.
+view of the result. No window, no surface, no swapchain — it is
+wgpu-native's `examples/triangle/main.c` with the GLFW half removed.
 
 ```ocaml
-let texture =
-  Device.create_texture device ~label:"target" ~format:Types.TextureFormat.rgba8_unorm
-    ~width:32 ~height:32
-    ~usage:Types.TextureUsage.(combine [ render_attachment; copy_src ])
-in
-let view = Texture.create_view texture ~label:"target-view" in
+let extent = T.Extent3D.init () in
+Ctypes.setf extent T.Extent3D.width (u32 32);
+Ctypes.setf extent T.Extent3D.height (u32 32);
+Ctypes.setf extent T.Extent3D.depthOrArrayLayers (u32 1);
+let texture_desc = T.TextureDescriptor.init () in
+Ctypes.setf texture_desc T.TextureDescriptor.usage
+  T.TextureUsage.(combine [ render_attachment; copy_src ]);
+Ctypes.setf texture_desc T.TextureDescriptor.dimension T.TextureDimension.v2_d;
+Ctypes.setf texture_desc T.TextureDescriptor.format T.TextureFormat.rgba8_unorm;
+Ctypes.setf texture_desc T.TextureDescriptor.size extent;
+Ctypes.setf texture_desc T.TextureDescriptor.mipLevelCount (u32 1);
+Ctypes.setf texture_desc T.TextureDescriptor.sampleCount (u32 1);
+let texture = F.wgpuDeviceCreateTexture device (Ctypes.addr texture_desc) in
+let view_desc = T.TextureViewDescriptor.init () in
+let view = F.wgpuTextureCreateView texture (Ctypes.addr view_desc) in
 
-let pipeline =
-  Device.create_render_pipeline device ~label:"triangle" ~shader_module:module_
-    ~targets:[ { Device.format = Types.TextureFormat.rgba8_unorm;
-                 write_mask = Types.ColorWriteMask.all } ]
-in
+(* The fragment state is reached through a pointer, so [fragment] and
+   [target] must stay alive until the create call returns. *)
+let target = T.ColorTargetState.init () in
+Ctypes.setf target T.ColorTargetState.format T.TextureFormat.rgba8_unorm;
+Ctypes.setf target T.ColorTargetState.writeMask T.ColorWriteMask.all;
+let fragment = T.FragmentState.init () in
+Ctypes.setf fragment T.FragmentState.module_ module_;
+Ctypes.setf fragment T.FragmentState.entryPoint (sv "fs_main");
+Ctypes.setf fragment T.FragmentState.targetCount (sz 1);
+Ctypes.setf fragment T.FragmentState.targets (Ctypes.addr target);
+let vertex = T.VertexState.init () in
+Ctypes.setf vertex T.VertexState.module_ module_;
+Ctypes.setf vertex T.VertexState.entryPoint (sv "vs_main");
+let pipeline_desc = T.RenderPipelineDescriptor.init () in
+Ctypes.setf pipeline_desc T.RenderPipelineDescriptor.vertex vertex;
+Ctypes.setf pipeline_desc T.RenderPipelineDescriptor.fragment (Ctypes.addr fragment);
+(* .primitive and .multisample also need filling in; see the example *)
+let pipeline = F.wgpuDeviceCreateRenderPipeline device (Ctypes.addr pipeline_desc) in
 
-let pass =
-  Command_encoder.begin_render_pass encoder ~label:"triangle"
-    ~color_attachments:
-      [ { Command_encoder.view;
-          load = Types.LoadOp.clear;
-          store = Types.StoreOp.store;
-          clear = (0.0, 0.0, 1.0, 1.0) } ]
-in
-Render_pass.set_pipeline pass pipeline;
-Render_pass.draw pass ~vertex_count:3;
-Render_pass.finish pass;
-Render_pass.release pass;
-Command_encoder.copy_texture_to_buffer encoder ~texture ~buffer:readback
-  ~bytes_per_row ~rows_per_image:32 ~width:32 ~height:32 ()
+let attachment = T.RenderPassColorAttachment.init () in
+Ctypes.setf attachment T.RenderPassColorAttachment.view view;
+Ctypes.setf attachment T.RenderPassColorAttachment.loadOp T.LoadOp.clear;
+Ctypes.setf attachment T.RenderPassColorAttachment.storeOp T.StoreOp.store;
+Ctypes.setf attachment T.RenderPassColorAttachment.clearValue clear;
+let pass_desc = T.RenderPassDescriptor.init () in
+Ctypes.setf pass_desc T.RenderPassDescriptor.colorAttachmentCount (sz 1);
+Ctypes.setf pass_desc T.RenderPassDescriptor.colorAttachments (Ctypes.addr attachment);
+let pass = F.wgpuCommandEncoderBeginRenderPass encoder (Ctypes.addr pass_desc) in
+ignore (Sys.opaque_identity attachment);
+F.wgpuRenderPassEncoderSetPipeline pass pipeline;
+F.wgpuRenderPassEncoderDraw pass (u32 3) (u32 1) (u32 0) (u32 0);
+F.wgpuRenderPassEncoderEnd pass;
+F.wgpuRenderPassEncoderRelease pass
 ```
 
-`Device.create_render_pipeline` covers the state the examples need and nothing
-more: `?vertex_entry_point` (default `"vs_main"`), `?fragment_entry_point`
-(default `"fs_main"`), `?topology`, `?cull_mode`, `?front_face`,
-`?sample_count`, `?layout`, and a list of colour targets. There are no vertex
-buffer layouts, no depth/stencil state and no blend state here — build the
-descriptor with `Wgpu.Types.RenderPipelineDescriptor` and call
-`Wgpu.Fn.wgpuDeviceCreateRenderPipeline` when you need them.
+Vertex buffer layouts, depth/stencil state, blending and explicit pipeline
+layouts are more fields of the same descriptors — there is no wrapper deciding
+which of them you are allowed to reach.
+
+`RenderPassColorAttachment.init ()` already sets `depthSlice` to
+`WGPU_DEPTH_SLICE_UNDEFINED`, which is exactly why you must never start a
+descriptor from `Ctypes.make`.
 
 One WebGPU rule the example encodes explicitly: a texture-to-buffer copy needs
-`bytes_per_row` to be a multiple of 256, so the readback buffer is padded:
+`bytesPerRow` to be a multiple of 256, so the readback buffer is padded:
 
 ```ocaml
 let bytes_per_row = ((width * 4) + 255) / 256 * 256
 ```
+
 
 ## Handles, enums, bit sets and structs
 
@@ -501,7 +605,7 @@ Wgpu.Types.Buffer.is_null h
 Wgpu.Types.Buffer.c_name     (* "WGPUBuffer" *)
 ```
 
-The ergonomic modules use these very types: `Wgpu.Buffer.t = Wgpu.Types.Buffer.t`.
+`wgpu.utils` uses these very types, so nothing ever has to be converted.
 
 ### Enums
 
@@ -569,8 +673,10 @@ An OCaml keyword gets a trailing underscore, and only then:
 
 WebGPU passes `WGPUStringView` (a pointer and a length) by value, and
 distinguishes "no string" (`NULL`, length `WGPU_STRLEN`) from the empty string.
-`Wgpu.Types.StringView.init ()` is the "no string" view; the ergonomic layer
-converts `string`/`string option` for you at every place it takes a `?label`.
+`Wgpu.Types.StringView.init ()` is the "no string" view.
+`Wgpu_utils.String_view` converts both ways; `of_string` returns the view
+*and* the value owning the bytes it points at, which you must keep alive
+across the call.
 
 ### Sentinels
 
@@ -581,39 +687,39 @@ Wgpu.Types.Constants.limit_u32_undefined     (* WGPU_LIMIT_U32_UNDEFINED *)
 Wgpu.Types.Constants.depth_clear_value_undefined  (* NaN *)
 ```
 
-## Dropping down to the raw layer
+## Descriptors and chained structs
 
-The ergonomic layer covers what the examples and tests need; the raw layer
-covers the headers. Mixing them needs no conversion — a sampler, for
-instance, is not covered ergonomically at all:
+A descriptor is a `Ctypes.structure` you fill in and hand to a `Wgpu.Fn` call
+by address. Nothing else is involved — a sampler, which no helper covers, is
+no different from a buffer:
 
 ```ocaml
 let sampler =
   let d = Wgpu.Types.SamplerDescriptor.init () in
   Ctypes.setf d Wgpu.Types.SamplerDescriptor.magFilter Wgpu.Types.FilterMode.linear;
   Ctypes.setf d Wgpu.Types.SamplerDescriptor.minFilter Wgpu.Types.FilterMode.linear;
-  let s = Wgpu.Fn.wgpuDeviceCreateSampler device (Ctypes.addr d) in
-  Wgpu.Device.check device;         (* raw calls do not check for you *)
-  s
+  Wgpu.Fn.wgpuDeviceCreateSampler device (Ctypes.addr d)
 in
-(* ... use it, e.g. in Device.Sampler_binding ... *)
+(* ... use it, e.g. as a WGPUBindGroupEntry.sampler ... *)
 Wgpu.Fn.wgpuSamplerRelease sampler
 ```
 
-Three rules when you do this:
+Three rules, and they are yours to keep:
 
-1. **Keep the descriptor alive** for the duration of the call. In the snippet
-   above `d` is a local `Ctypes.structure` that is still in scope; when a
-   descriptor points at *other* allocations (an array of entries, a string
-   view, a chained struct) all of them must stay reachable until the call
-   returns. That is what the ergonomic layer's arena does.
-2. **Call `Device.check`** afterwards: the raw layer does not look at the
-   device's error sink.
-3. **Check for null.** Raw constructors return a null handle on failure;
-   `Wgpu.Types.Sampler.is_null` tells you.
+1. **Keep alive everything the descriptor points at**, for the duration of the
+   call. In the snippet above `d` is a local `Ctypes.structure` that is still
+   in scope; when a descriptor points at *other* allocations — an array of
+   entries, a `WGPUStringView`, a chained struct — every OCaml value behind
+   those pointers must stay reachable until the call returns. Ending the
+   sequence with `ignore (Sys.opaque_identity keepalive)` is how you say so to
+   the compiler.
+2. **Check for null.** A constructor returns a null handle on failure;
+   `Wgpu.Types.Sampler.is_null` tells you, and the uncaptured-error callback
+   tells you why (see [Errors](#errors)).
+3. **Release what you created**, in reverse order.
 
-Chained (`nextInChain`) extension structs work the same way — set the tag,
-coerce the pointer:
+Chained (`nextInChain`) extension structs are the same idea — set the tag,
+coerce the pointer, keep the extension struct alive:
 
 ```ocaml
 let extras = Wgpu.Types.InstanceExtras.init () in
@@ -621,14 +727,17 @@ let chain = Ctypes.getf extras Wgpu.Types.InstanceExtras.chain in
 Ctypes.setf chain Wgpu.Types.ChainedStruct.sType
   Wgpu.Types.NativeSType.instance_extras;
 Ctypes.setf extras Wgpu.Types.InstanceExtras.chain chain;
+Ctypes.setf extras Wgpu.Types.InstanceExtras.backends Wgpu.Types.InstanceBackend.vulkan;
 let desc = Wgpu.Types.InstanceDescriptor.init () in
 Ctypes.setf desc Wgpu.Types.InstanceDescriptor.nextInChain
   (Ctypes.coerce (Ctypes.ptr Wgpu.Types.InstanceExtras.t)
-     (Ctypes.ptr Wgpu.Types.ChainedStruct.t) (Ctypes.addr extras))
+     (Ctypes.ptr Wgpu.Types.ChainedStruct.t) (Ctypes.addr extras));
+let instance = Wgpu.Fn.wgpuCreateInstance (Ctypes.addr desc) in
+ignore (Sys.opaque_identity extras)
 ```
 
-(`Instance.create ?backends ?flags` does exactly this for the two
-`WGPUInstanceExtras` fields it exposes.)
+(`WGPUShaderSourceWGSL` in the compute example is the same pattern, except
+that `init ()` has already set its `chain.sType` for you.)
 
 `Wgpu.Fn.names` is the list of every bound entry point in header order, which
 is handy for checking whether something exists at all:
@@ -649,16 +758,18 @@ This is the part of the design worth reading before you build anything large;
   `Ctypes.static_funptr` and `Wgpu.Callback` provides the only two safe ways to
   obtain one:
   * `Wgpu.Callback.permanent fn f` — retained for the life of the process; used
-    for the handful of trampolines the ergonomic layer installs once;
+    for trampolines installed once, such as the uncaptured-error handler and
+    the three inside `wgpu.utils`;
   * `Wgpu.Callback.Userdata` — a token table addressed by the `void *userdata1`
     WebGPU hands back, so one permanent trampoline can serve unbounded
     per-call closures. `Userdata.live_count ()` returns the number of live
     tokens and is asserted back to zero by the GPU tests.
-* **Asynchronous work is driven by polling.** `Device.poll ~wait:true device`
-  runs the device's submission queue (and, with `~wait:true`, blocks until
-  everything submitted has completed), which is what makes buffer-mapping and
-  work-done callbacks fire. `Instance.process_events instance` is the
-  instance-level equivalent. `Buffer.read_sync` polls for you.
+* **Asynchronous work is driven by polling.**
+  `wgpuDevicePoll device true NULL` runs the device's submission queue and
+  blocks until everything submitted has completed, which is what makes
+  buffer-mapping and work-done callbacks fire. `wgpuInstanceProcessEvents` is
+  the instance-level equivalent. `Wgpu_utils.Buffer.read_bytes` polls for
+  you.
 * `WGPUFuture` and `wgpuInstanceWaitAny` are **not implemented in wgpu-native
   v29** (`wgpuBufferMapAsync` returns a null future); the future-returning
   entry points are bound, but ignore what they return and poll instead.
@@ -679,9 +790,10 @@ This is the part of the design worth reading before you build anything large;
 * **A callback must not let an exception escape**, because it would unwind
   through Rust frames. Wrap the body in
   `Wgpu.Callback.protect ~where:"..." (fun () -> ...)`, which records the
-  exception instead; the ergonomic layer re-raises recorded failures as
-  `Wgpu.Error` at its next checkpoint, and `Wgpu.Callback.take_failures ()`
-  hands them to you directly.
+  exception instead. Nothing re-raises those failures for you:
+  `Wgpu.Callback.take_failures ()` hands them over and
+  `Wgpu.Callback.pending_failures ()` counts them, so collect them wherever
+  your program checks for trouble.
 * Running the OCaml GC inside a wgpu callback is tested, not assumed
   (`test/gpu/test_gc_lifetime.ml`), and so is the whole foreign-thread path
   (`test/thread/test_foreign_thread_callbacks.ml`).
@@ -748,8 +860,8 @@ The list includes every `SetLabel` entry point, `wgpuGetProcAddress`,
 `wgpuDeviceGetAdapterInfo`. `test/unit/test_pin.ml` checks that every name on
 the list is really bound, so the list cannot drift from the bindings.
 
-Labels themselves work fine — pass them at creation time, which is what the
-`?label` arguments do.
+Labels themselves work fine — set the `label` field of the descriptor at
+creation time.
 
 ## What the tests check, and how to run them
 
@@ -758,7 +870,7 @@ Three tiers, deliberately separated so the cheap ones run anywhere:
 ```sh
 dune test        # 145 checks + the 1914-line ABI diff  (C compiler, no GPU)
 dune build @gen  # the committed generated code is reproducible
-dune build @gpu  # 76 checks against a real adapter
+dune build @gpu  # 71 checks against a real adapter
 ```
 
 * **`dune test`** runs `test/unit` (the pin and version encoding, the naming
@@ -773,9 +885,10 @@ dune build @gpu  # 76 checks against a real adapter
 * **`dune build @gen`** regenerates the four generated modules from the
   vendored headers and diffs them against the committed copies (`dune promote`
   accepts a new output).
-* **`dune build @gpu`** runs `test_device`, `test_compute` (exact numerical
-  readback), `test_render` (exact pixel readback), `test_errors` and
-  `test_gc_lifetime`. With
+* **`dune build @gpu`** runs `test_device` (16 checks), `test_compute` (5,
+  exact numerical readback), `test_render` (12, exact pixel readback),
+  `test_errors` (10), `test_gc_lifetime` (10) and `test_callback_safety` (18),
+  all of them against the raw entry points. With
   `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json` it runs entirely on
   lavapipe, no GPU required — which is how CI runs it.
 
@@ -799,12 +912,10 @@ byte-for-byte reproducible.
 
 ## Limitations to plan around
 
-* **Not covered by the ergonomic layer** (all reachable through `Wgpu.Fn` +
-  `Wgpu.Types`): surfaces, swapchains and every windowing integration, render
-  bundles, query sets and timestamps, samplers and texture sampling, vertex
-  buffer layouts, depth/stencil state, blending, explicit pipeline and bind
-  group layouts, SPIR-V shader modules, immediates, multi-draw, external
-  textures and the Metal interop entry points.
+* **Raw bindings.** There is no windowing, surface or swapchain integration
+  and no convenience wrapper for anything: you fill in descriptors, you keep
+  the memory they point at alive, you check for null handles and you release
+  every handle yourself. What you get in exchange is that nothing is missing.
 * **Not usable in wgpu-native v29 at all**: futures, `wgpuGetProcAddress`, and
   the 35 unimplemented entry points above.
 * **One pin.** These bindings target wgpu-native v29.0.1.1 only; the loader

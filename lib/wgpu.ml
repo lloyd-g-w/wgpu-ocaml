@@ -1,18 +1,21 @@
 (* Entry point of the [wgpu] library.
 
-   The library is split in two layers:
+   These are raw bindings: {!Types} and {!Fn} are generated from the vendored
+   headers by [gen/gen.ml] and mirror [webgpu.h] and [wgpu.h] one for one —
+   same function names, same struct fields, same enum values, same defaults.
+   Nothing is hidden, nothing is invented, and there is no hand-written
+   convenience layer in this library.
 
-   - the *raw* layer ({!Types}, {!Fn}), generated from the vendored headers by
-     [gen/gen.ml].  It mirrors [webgpu.h] and [wgpu.h] one-for-one: same
-     function names, same struct fields, same enum values.  Nothing is
-     hidden and nothing is invented.
-   - a small *ergonomic* layer (everything else in this module), hand written
-     on top of the raw layer.  It owns lifetimes explicitly (every [create]
-     has a matching [release]), turns WebGPU errors into OCaml exceptions and
-     converts strings, lists and options for the descriptors that examples and
-     tests actually need.
+   {!Callback} is not convenience: ctypes frees the libffi closure behind a
+   [Foreign.funptr] when the OCaml value owning it is collected, so obtaining a
+   [Ctypes.static_funptr] to store in a WebGPU descriptor without rooting the
+   closure is a use-after-free, and the thread registration it performs is what
+   makes callbacks arriving on wgpu-native's own threads safe.  It is the only
+   correct way to build one of these pointers.
 
-   Anything the ergonomic layer does not cover is reachable through {!Fn}. *)
+   The few helpers that nearly every program needs anyway — the synchronous
+   adapter/device requests, a blocking buffer read, [WGPUStringView]
+   conversion — live in the separate [wgpu.utils] library ([Wgpu_utils]). *)
 
 (** The pinned upstream release these bindings were generated from.
 
@@ -44,5 +47,3 @@ module Abi = Wgpu_abi
 
     @canonical Wgpu.Callback *)
 module Callback = Wgpu_callback
-
-include Wgpu_api

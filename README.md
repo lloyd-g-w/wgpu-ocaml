@@ -3,11 +3,16 @@
 [![CI](https://github.com/lloyd-g-w/wgpu-ocaml/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/lloyd-g-w/wgpu-ocaml/actions/workflows/ci.yml)
 [![Docs](https://github.com/lloyd-g-w/wgpu-ocaml/actions/workflows/docs.yml/badge.svg?branch=main)](https://github.com/lloyd-g-w/wgpu-ocaml/actions/workflows/docs.yml)
 
-OCaml bindings to **WebGPU** through
+**Raw** OCaml bindings to **WebGPU** through
 [wgpu-native](https://github.com/gfx-rs/wgpu-native), generated from the
 vendored upstream headers and bound with `ctypes-foreign`.
 `libwgpu_native` is loaded dynamically at run time: no C stubs are compiled,
 no headers are needed at build time, and there is nothing to link.
+
+The `wgpu` library mirrors the headers and adds nothing to them, like the other
+wgpu-native bindings (WebGPU-C++, `wgpu_native_zig`, `wgpu-odin`, Silk.NET). A
+separate, deliberately tiny `wgpu.utils` library holds the three helpers no
+program can avoid writing.
 
 **[Guide](https://lloyd-g-w.github.io/wgpu-ocaml/guide.html)** ·
 **[API reference](https://lloyd-g-w.github.io/wgpu-ocaml/api/wgpu/index.html)** ·
@@ -43,7 +48,7 @@ rasteriser, headless. No other platform has been executed
 | opaque handles | 23 |
 | function-pointer typedefs | 214 |
 | `WGPU_*_INIT` default sets | 92 |
-| generated OCaml | ~15,300 lines |
+| generated OCaml | ~15,500 lines |
 
 That surface is checked by the test suite rather than asserted here (the line
 count is just `wc -l`): `dune test` rescans the headers with an independent
@@ -108,52 +113,66 @@ The flake does not install a different OCaml or wgpu-native version: those
 remain managed by opam and our pinned downloader. See the
 [Nix guide](docs/GUIDE.md#nix--nixos) for first-time setup.
 
-## Two layers
+## The bindings
 
-**The raw layer** mirrors `webgpu.h` and `wgpu.h` one for one — same entry
-point names, same struct field spellings, same enum values, same defaults:
-
-```ocaml
-let desc = Wgpu.Types.BufferDescriptor.init () in    (* the header's INIT defaults *)
-Ctypes.setf desc Wgpu.Types.BufferDescriptor.usage
-  Wgpu.Types.BufferUsage.(combine [ storage; copy_src ]);
-Ctypes.setf desc Wgpu.Types.BufferDescriptor.size (Unsigned.UInt64.of_int 1024);
-let buffer = Wgpu.Fn.wgpuDeviceCreateBuffer device (Ctypes.addr desc)
-```
-
-**The ergonomic layer** is small, hand written, and owns lifetimes explicitly:
+`Wgpu.Types` and `Wgpu.Fn` mirror `webgpu.h` and `wgpu.h` one for one — same
+entry point names, same struct field spellings, same enum values, same
+defaults. You build descriptors the way the C examples do, starting from the
+header's `WGPU_*_INIT` defaults:
 
 ```ocaml
-open Wgpu
+module T = Wgpu.Types
+module F = Wgpu.Fn
 
-let () =
-  let instance = Instance.create () in
-  let adapter = Instance.request_adapter instance in
-  let device = Adapter.request_device ~label:"demo" adapter in
-  let queue = Device.queue device in
-  let buffer =
-    Device.create_buffer device ~label:"data" ~size:1024
-      (* copy_dst is what makes Queue.write_buffer legal *)
-      ~usage:Types.BufferUsage.(combine [ storage; copy_dst; copy_src ])
-  in
-  Queue.write_buffer queue buffer (Bytes.make 1024 '\000');
-  (* ... *)
-  Buffer.release buffer;
-  Queue.release queue;
-  Device.release device;
-  Adapter.release adapter;
-  Instance.release instance
+let buffer =
+  let desc = T.BufferDescriptor.init () in    (* the header's INIT defaults *)
+  let label, keepalive = Wgpu_utils.String_view.of_string "data" in
+  Ctypes.setf desc T.BufferDescriptor.label label;
+  (* copy_dst is what makes wgpuQueueWriteBuffer legal *)
+  Ctypes.setf desc T.BufferDescriptor.usage
+    T.BufferUsage.(combine [ storage; copy_dst; copy_src ]);
+  Ctypes.setf desc T.BufferDescriptor.size (Unsigned.UInt64.of_int 1024);
+  let b = F.wgpuDeviceCreateBuffer device (Ctypes.addr desc) in
+  (* the label view is a bare pointer into memory [keepalive] owns *)
+  ignore (Sys.opaque_identity keepalive);
+  b
+
+let () = F.wgpuBufferRelease buffer
 ```
 
-Both layers share the same handle types, so you can mix them freely: anything
-the ergonomic layer does not cover (surfaces, render bundles, query sets,
-samplers, …) is one `Wgpu.Fn.*` call away. The
-[guide](https://lloyd-g-w.github.io/wgpu-ocaml/guide.html) walks through both,
-and [`DESIGN.md`](DESIGN.md) §9 lists exactly what is and is not covered.
+There is no hand-written wrapper around any of that: nothing is renamed,
+nothing is hidden, and there is no coverage list to check against, because
+every entry point in the pinned headers is bound.
+
+One exception, and it is a correctness requirement rather than sugar:
+**`Wgpu.Callback`** is the only correct way to obtain the
+`Ctypes.static_funptr` a WebGPU descriptor wants. ctypes frees the libffi
+closure behind a `Foreign.funptr` when the OCaml value owning it is collected,
+so an unrooted pointer written into a descriptor is a use-after-free; and the
+thread registration those closures perform is what makes a callback arriving on
+one of wgpu-native's own threads safe (see [`DESIGN.md`](DESIGN.md) §5).
+
+## `wgpu.utils`
+
+A separate library (`Wgpu_utils`, ~200 lines) with one admission rule: a helper
+belongs there only if **nearly every program has to write it anyway** and the
+other wgpu-native bindings ship it too. Today that is exactly three things:
+
+* `Sync.request_adapter` / `Sync.request_device` — wgpu-native answers both
+  requests inside the call, but the handle still comes back through a C
+  callback and a `userdata` pointer;
+* `Buffer.map_read_sync` / `Buffer.read_bytes` — the one genuinely asynchronous
+  operation every headless program performs, driven by `wgpuDevicePoll`;
+* `String_view.to_string` / `String_view.of_string` — `WGPUStringView`
+  conversion, both ways.
+
+Failures are `result` values, not exceptions. There are no descriptor
+builders, no error sink, no logging wrapper and no arena.
 
 [`examples/headless_compute.ml`](examples/headless_compute.ml) and
 [`examples/offscreen_render.ml`](examples/offscreen_render.ml) are complete,
-runnable versions of both.
+runnable programs written this way, in the shape of wgpu-native's own C
+examples.
 
 ## How it is built
 
@@ -173,15 +192,16 @@ runnable versions of both.
   bindings.
 * `test/unit` re-scans the headers with an independent scanner and requires
   the generated surface to match it exactly.
-* `test/gpu` runs real compute and render passes on lavapipe and asserts on
-  the numbers and pixels that come back, plus GC and error-handling behaviour.
+* `test/gpu` runs real compute and render passes on lavapipe — through the raw
+  entry points — and asserts on the numbers and pixels that come back, plus GC
+  and error-handling behaviour.
 * [`DESIGN.md`](DESIGN.md) is the contract between all of those — read it
   before changing any of them.
 
 ## Documentation
 
 * [Guide](https://lloyd-g-w.github.io/wgpu-ocaml/guide.html) — installing,
-  the two layers, lifetimes, compute and render walkthroughs, callbacks and
+  descriptors and lifetimes, compute and render walkthroughs, callbacks and
   polling, errors, the loader, limitations
   ([source](docs/GUIDE.md)).
 * [API reference](https://lloyd-g-w.github.io/wgpu-ocaml/api/wgpu/index.html) —
@@ -199,11 +219,9 @@ dune exec doc/site/build_site.exe -- --out _site
 
 ## Limitations
 
-* **Ergonomic layer only.** Surfaces/swapchains and windowing, render bundles,
-  query sets and timestamps, samplers, vertex buffer layouts, depth/stencil
-  and blend state, explicit pipeline layouts, SPIR-V shaders, immediates,
-  multi-draw, external textures and Metal interop are *not* wrapped. They are
-  all bound in `Wgpu.Fn` and usable on the same handles.
+* **Raw bindings.** There is no windowing, surface or swapchain integration,
+  and no convenience wrapper for anything: you write descriptors, you own the
+  memory they point at, and you release every handle yourself.
 * **Unusable in wgpu-native v29 regardless of these bindings**: `WGPUFuture` /
   `wgpuInstanceWaitAny` (asynchronous work is driven by polling instead),
   `wgpuGetProcAddress`, and the 35 entry points listed as `unimplemented` in
