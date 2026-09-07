@@ -1,0 +1,6 @@
+; The odoc landing page for the "wgpu" package (doc/index.mld), plus the
+; generated API reference for the library.  `dune build @doc` needs neither
+; libwgpu_native nor a GPU.
+
+(documentation
+ (package wgpu))

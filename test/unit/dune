@@ -1,0 +1,10 @@
+; Unit tests: no GPU, no libwgpu_native, no C compiler.  `dune test` runs
+; these together with the ABI check in ../abi.
+
+(tests
+ (names test_pin test_naming test_coverage test_vendor_headers test_loader_diagnostics)
+ (libraries wgpu wgpu_scripts unix)
+ (deps
+  ../../vendor/wgpu-native/pin.txt
+  ../../vendor/wgpu-native/include/webgpu/webgpu.h
+  ../../vendor/wgpu-native/include/webgpu/wgpu.h))

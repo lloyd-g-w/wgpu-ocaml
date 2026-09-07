@@ -1,0 +1,7 @@
+; The generator uses the OCaml stdlib only: it must be runnable before (and
+; independently of) the bindings themselves, and its output must be
+; byte-for-byte reproducible.
+
+(executable
+ (name gen)
+ (modules c_header emit gen))

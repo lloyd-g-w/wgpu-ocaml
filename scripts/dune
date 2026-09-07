@@ -1,0 +1,11 @@
+; Developer helpers.  [wgpu_scripts] is an internal library (not installed) so
+; that the tests can reuse the SHA-256 implementation.
+
+(library
+ (name wgpu_scripts)
+ (modules sha256))
+
+(executable
+ (name fetch_wgpu_native)
+ (modules fetch_wgpu_native)
+ (libraries wgpu wgpu_scripts unix))

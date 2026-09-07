@@ -1,0 +1,99 @@
+{0 wgpu — OCaml bindings to WebGPU through wgpu-native}
+
+OCaml bindings to the WebGPU C API ([webgpu.h]) and the wgpu-native
+extensions ([wgpu.h]), generated from the vendored upstream headers of one
+pinned {{:https://github.com/gfx-rs/wgpu-native}wgpu-native} release and bound
+with {{:https://github.com/yallop/ocaml-ctypes}ctypes-foreign}.
+[libwgpu_native] is opened with [dlopen] on first use: no C stubs are
+compiled, no headers are needed at build time, and there is nothing to link.
+
+{b This project was written entirely by AI.} The generator, the runtime, the
+generated bindings, the tests, the examples, the CI workflows and this page
+were produced by AI agents with no hand-written human code; the only files
+that are not AI-authored are the vendored upstream headers under [vendor/].
+Correctness rests on automated checks — a C ABI probe compiled from the
+vendored headers, an independent header rescan, and real headless GPU runs —
+not on human review. See
+{{:https://lloyd-g-w.github.io/wgpu-ocaml/#authorship}Authorship} for the
+caveats, and {{:https://lloyd-g-w.github.io/wgpu-ocaml/#licensing}Licensing}:
+no licence has been chosen for the original code yet.
+
+{1 Where to start}
+
+- {{:https://lloyd-g-w.github.io/wgpu-ocaml/guide.html}The guide} — an
+  example-driven walkthrough: installing the native library, the two layers,
+  handles, enums and bit sets, struct defaults, descriptors and lifetimes,
+  compute, offscreen rendering, callbacks and polling, errors, and what to do
+  when the ergonomic layer stops.
+- {{:https://lloyd-g-w.github.io/wgpu-ocaml/}Project home} — install,
+  quick start, status, limitations.
+- {{:https://lloyd-g-w.github.io/wgpu-ocaml/design.html}Design contract} —
+  the rules the generator, the runtime and the tests must keep.
+- {!Wgpu} — the API reference below.
+
+{1 Layout of the [Wgpu] module}
+
+The library has two layers and they share the same types, so they mix freely.
+
+- {b The raw layer}, generated from the headers:
+  {!Wgpu.Types} (enums, bit sets, opaque handles, structs, callback types) and
+  {!Wgpu.Fn} (one OCaml function per C entry point, under its exact C name,
+  e.g. {!Wgpu.Fn.wgpuDeviceCreateBuffer}). Struct fields keep their C
+  spelling, so the headers stay greppable from OCaml, and every struct module
+  has an [init ()] that applies the header's [WGPU_*_INIT] defaults.
+- {b The ergonomic layer}, hand written: {!Wgpu.Instance}, {!Wgpu.Adapter},
+  {!Wgpu.Device}, {!Wgpu.Queue}, {!Wgpu.Buffer}, {!Wgpu.Command_encoder},
+  {!Wgpu.Compute_pass}, {!Wgpu.Render_pass}, {!Wgpu.Texture},
+  {!Wgpu.Shader_module}, {!Wgpu.Compute_pipeline}, {!Wgpu.Render_pipeline},
+  {!Wgpu.Bind_group}, {!Wgpu.Command_buffer} and {!Wgpu.Log}. Lifetimes are
+  explicit — every [create]/[request] has a matching [release] — and WebGPU
+  errors are raised as {!Wgpu.Error}.
+- {b Runtime plumbing}: {!Wgpu.Loader} (search path, [dlopen], version gate),
+  {!Wgpu.Pin} (the pinned upstream release and its checksums),
+  {!Wgpu.Callback} (keeping OCaml closures alive across C calls) and
+  {!Wgpu.Abi} (the layout dump used by the ABI test).
+
+{1 A taste}
+
+{[
+open Wgpu
+
+let () =
+  let instance = Instance.create () in
+  let adapter = Instance.request_adapter instance in
+  let device = Adapter.request_device ~label:"demo" adapter in
+  let queue = Device.queue device in
+  let buffer =
+    Device.create_buffer device ~label:"data" ~size:1024
+      (* copy_dst is what makes Queue.write_buffer legal *)
+      ~usage:Types.BufferUsage.(combine [ storage; copy_dst; copy_src ])
+  in
+  Queue.write_buffer queue buffer (Bytes.make 1024 '\000');
+  Buffer.release buffer;
+  Queue.release queue;
+  Device.release device;
+  Adapter.release adapter;
+  Instance.release instance
+]}
+
+Anything the ergonomic layer does not cover — surfaces and swapchains, render
+bundles, query sets, samplers, vertex buffer layouts, depth/stencil and blend
+state, explicit pipeline layouts, SPIR-V shaders — is one {!Wgpu.Fn} call away
+on the very same handles.
+
+{1 Things worth knowing before you start}
+
+- {b Start every struct from [init ()]}, never from [Ctypes.make]: zero is not
+  a valid default in WebGPU (undefined limits are [0xFFFFFFFF], a depth clear
+  value is [NaN], an extension struct's [sType] must be set).
+- {b Lifetimes are yours.} No finaliser releases a GPU handle for you.
+- {b One domain at a time.} Callbacks may arrive on threads wgpu-native owns,
+  so entry points release the OCaml domain lock and closures register the
+  calling thread and re-take it; what is not supported is driving wgpu from
+  several {e domains}, since registered foreign threads attach to domain 0.
+- {b Futures do not work in this release.} [WGPUFuture] and
+  [wgpuInstanceWaitAny] are not implemented in wgpu-native v29; asynchronous
+  work is driven by {!Wgpu.Device.poll} and
+  {!Wgpu.Instance.process_events} instead.
+- {b Some bound entry points abort the process} because wgpu-native leaves
+  them [unimplemented!()]. They are listed in {!Wgpu.Pin.unimplemented}.

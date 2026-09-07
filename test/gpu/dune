@@ -1,0 +1,48 @@
+; Tests that need libwgpu_native and a working adapter.  They hang off the
+; `gpu` alias, not `runtest`, so that `dune test` stays runnable on a machine
+; with no GPU stack:
+;
+;   dune build @gpu                 (uses the default Vulkan/Metal/DX12 adapter)
+;   VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json dune build @gpu
+;                                   (forces the lavapipe software rasteriser)
+
+(executables
+ (names test_device test_compute test_render test_errors test_gc_lifetime
+  test_callback_safety)
+ (libraries wgpu ctypes))
+
+(rule
+ (alias gpu)
+ (deps test_device.exe)
+ (action
+  (run ./test_device.exe)))
+
+(rule
+ (alias gpu)
+ (deps test_compute.exe)
+ (action
+  (run ./test_compute.exe)))
+
+(rule
+ (alias gpu)
+ (deps test_render.exe)
+ (action
+  (run ./test_render.exe)))
+
+(rule
+ (alias gpu)
+ (deps test_errors.exe)
+ (action
+  (run ./test_errors.exe)))
+
+(rule
+ (alias gpu)
+ (deps test_gc_lifetime.exe)
+ (action
+  (run ./test_gc_lifetime.exe)))
+
+(rule
+ (alias gpu)
+ (deps test_callback_safety.exe)
+ (action
+  (run ./test_callback_safety.exe)))

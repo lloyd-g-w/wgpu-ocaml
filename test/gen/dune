@@ -1,0 +1,10 @@
+; Regression tests for the generator's "abort rather than guess" rules.  They
+; run the generator binary on the synthetic headers in this directory; no
+; library, no libwgpu_native, no GPU.
+
+(test
+ (name test_generator_guards)
+ (deps
+  %{exe:../../gen/gen.exe}
+  ../../vendor/wgpu-native/pin.txt
+  (glob_files *.h)))

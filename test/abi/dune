@@ -1,0 +1,64 @@
+; ABI conformance: the C compiler computes struct layouts, enum values and
+; sentinels from the *vendored headers*; ctypes computes them from the
+; *generated bindings*.  The two dumps must agree exactly.
+;
+; This test needs a C compiler but not libwgpu_native and not a GPU.
+
+(executable
+ (name dump_abi)
+ (modules dump_abi)
+ (libraries wgpu))
+
+(rule
+ (targets abi_probe.c)
+ (deps
+  %{exe:../../gen/gen.exe}
+  ../../vendor/wgpu-native/pin.txt
+  ../../vendor/wgpu-native/include/webgpu/webgpu.h
+  ../../vendor/wgpu-native/include/webgpu/wgpu.h)
+ (action
+  (with-stdout-to
+   %{targets}
+   (run
+    %{exe:../../gen/gen.exe}
+    abi-probe
+    ../../vendor/wgpu-native/pin.txt
+    ../../vendor/wgpu-native/include/webgpu/webgpu.h
+    ../../vendor/wgpu-native/include/webgpu/wgpu.h))))
+
+(rule
+ (targets abi_probe.bin)
+ (deps
+  abi_probe.c
+  ../../vendor/wgpu-native/include/webgpu/webgpu.h
+  ../../vendor/wgpu-native/include/webgpu/wgpu.h)
+ (action
+  (run
+   %{cc}
+   -std=c11
+   -I
+   ../../vendor/wgpu-native/include
+   -o
+   %{targets}
+   abi_probe.c)))
+
+(rule
+ (targets abi_from_c.txt)
+ (deps abi_probe.bin)
+ (action
+  (with-stdout-to
+   %{targets}
+   (run ./abi_probe.bin))))
+
+(rule
+ (targets abi_from_ocaml.txt)
+ (deps dump_abi.exe)
+ (action
+  (with-stdout-to
+   %{targets}
+   (run ./dump_abi.exe))))
+
+(rule
+ (alias runtest)
+ (action
+  (diff abi_from_c.txt abi_from_ocaml.txt)))

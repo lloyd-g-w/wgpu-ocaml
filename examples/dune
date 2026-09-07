@@ -1,0 +1,7 @@
+; Runnable examples.  They need libwgpu_native (see
+; scripts/fetch_wgpu_native.ml) and a working Vulkan/Metal/DX12 adapter; the
+; software rasteriser lavapipe is enough.
+
+(executables
+ (names headless_compute offscreen_render)
+ (libraries wgpu))

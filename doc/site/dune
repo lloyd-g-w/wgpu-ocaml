@@ -1,0 +1,11 @@
+; The GitHub Pages site generator.  Stdlib + unix only (unix is needed for
+; symlink-safe deletion of the output directory): building the documentation
+; must not need libwgpu_native, a GPU or a C toolchain.
+;
+;   dune build @doc
+;   dune exec doc/site/build_site.exe -- --out _site
+
+(executable
+ (name build_site)
+ (modules build_site)
+ (libraries unix))

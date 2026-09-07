@@ -1,0 +1,18 @@
+; Proof that callbacks arriving on a foreign thread work (DESIGN.md §5).
+; Needs a C compiler, but no GPU and no libwgpu_native.
+
+(executable
+ (name test_foreign_thread_callbacks)
+ (libraries wgpu ctypes ctypes.foreign threads.posix))
+
+(rule
+ (targets libforeign_thread_probe.so)
+ (deps foreign_thread_probe.c)
+ (action
+  (run %{cc} -shared -fPIC -o %{targets} foreign_thread_probe.c)))
+
+(rule
+ (alias runtest)
+ (deps test_foreign_thread_callbacks.exe libforeign_thread_probe.so)
+ (action
+  (run ./test_foreign_thread_callbacks.exe)))

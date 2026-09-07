@@ -1,0 +1,79 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+# Read-only by default; only the deploy job asks for more.
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build the site (odoc + doc/site/build_site.ml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Building the documentation needs no GPU, no libwgpu_native and no Rust
+      # toolchain: libffi + pkg-config are for ctypes-foreign, and odoc comes
+      # from the switch.  The site generator is plain OCaml (doc/site).
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libffi-dev pkg-config
+
+      - name: Set up OCaml 5.5.1
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.5.1"
+
+      - name: Install opam dependencies (with odoc)
+        run: opam install . --deps-only --with-doc
+
+      - name: Build the API reference (odoc)
+        run: opam exec -- dune build @doc
+
+      # Renders README.md, docs/GUIDE.md and DESIGN.md, copies the odoc output
+      # to api/, and fails on any broken internal link or heading anchor.
+      - name: Assemble the site
+        run: opam exec -- dune exec doc/site/build_site.exe -- --out _site
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  # Pull requests build the site above but never deploy it.
+  deploy:
+    name: deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # Requires GitHub Pages to be enabled once by a repository admin:
+      # Settings -> Pages -> Build and deployment -> Source: "GitHub Actions".
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4

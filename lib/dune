@@ -1,0 +1,92 @@
+(include_subdirs unqualified)
+
+(library
+ (name wgpu)
+ (public_name wgpu)
+ (libraries ctypes ctypes.foreign integers threads.posix))
+
+; ---------------------------------------------------------------------------
+; Generated sources.
+;
+; The committed copies under lib/generated are the source of truth for the
+; build; `dune build @gen` regenerates them from the vendored headers and fails
+; if the result differs (`dune promote` accepts the new output).  This is what
+; makes the generator's determinism checkable in CI.
+; ---------------------------------------------------------------------------
+
+(rule
+ (targets wgpu_pin.ml.gen)
+ (deps
+  %{exe:../gen/gen.exe}
+  ../vendor/wgpu-native/pin.txt
+  ../vendor/wgpu-native/include/webgpu/webgpu.h
+  ../vendor/wgpu-native/include/webgpu/wgpu.h)
+ (action
+  (with-stdout-to
+   %{targets}
+   (run
+    %{exe:../gen/gen.exe}
+    pin
+    ../vendor/wgpu-native/pin.txt
+    ../vendor/wgpu-native/include/webgpu/webgpu.h
+    ../vendor/wgpu-native/include/webgpu/wgpu.h))))
+
+(rule
+ (targets wgpu_types.ml.gen)
+ (deps
+  %{exe:../gen/gen.exe}
+  ../vendor/wgpu-native/pin.txt
+  ../vendor/wgpu-native/include/webgpu/webgpu.h
+  ../vendor/wgpu-native/include/webgpu/wgpu.h)
+ (action
+  (with-stdout-to
+   %{targets}
+   (run
+    %{exe:../gen/gen.exe}
+    types
+    ../vendor/wgpu-native/pin.txt
+    ../vendor/wgpu-native/include/webgpu/webgpu.h
+    ../vendor/wgpu-native/include/webgpu/wgpu.h))))
+
+(rule
+ (targets wgpu_fn.ml.gen)
+ (deps
+  %{exe:../gen/gen.exe}
+  ../vendor/wgpu-native/pin.txt
+  ../vendor/wgpu-native/include/webgpu/webgpu.h
+  ../vendor/wgpu-native/include/webgpu/wgpu.h)
+ (action
+  (with-stdout-to
+   %{targets}
+   (run
+    %{exe:../gen/gen.exe}
+    fn
+    ../vendor/wgpu-native/pin.txt
+    ../vendor/wgpu-native/include/webgpu/webgpu.h
+    ../vendor/wgpu-native/include/webgpu/wgpu.h))))
+
+(rule
+ (targets wgpu_abi.ml.gen)
+ (deps
+  %{exe:../gen/gen.exe}
+  ../vendor/wgpu-native/pin.txt
+  ../vendor/wgpu-native/include/webgpu/webgpu.h
+  ../vendor/wgpu-native/include/webgpu/wgpu.h)
+ (action
+  (with-stdout-to
+   %{targets}
+   (run
+    %{exe:../gen/gen.exe}
+    abi
+    ../vendor/wgpu-native/pin.txt
+    ../vendor/wgpu-native/include/webgpu/webgpu.h
+    ../vendor/wgpu-native/include/webgpu/wgpu.h))))
+
+(rule
+ (alias gen)
+ (action
+  (progn
+   (diff generated/wgpu_pin.ml wgpu_pin.ml.gen)
+   (diff generated/wgpu_types.ml wgpu_types.ml.gen)
+   (diff generated/wgpu_fn.ml wgpu_fn.ml.gen)
+   (diff generated/wgpu_abi.ml wgpu_abi.ml.gen))))

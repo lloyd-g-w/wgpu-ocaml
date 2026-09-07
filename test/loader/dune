@@ -1,0 +1,41 @@
+; The loader's rejection paths.  Needs a C compiler (for the two fixture
+; libraries) but no libwgpu_native and no GPU: the fixtures stand in for a
+; wgpu-native build with the wrong version and for a library that is not
+; wgpu-native at all.
+;
+; The loader caches its handle process-wide, so every scenario is a separate
+; process.
+
+(executable
+ (name test_loader_fixture)
+ (libraries wgpu unix))
+
+(rule
+ (targets fake_wrong_version.so)
+ (deps fake_wrong_version.c)
+ (action
+  (run %{cc} -shared -fPIC -o %{targets} fake_wrong_version.c)))
+
+(rule
+ (targets fake_not_wgpu.so)
+ (deps fake_not_wgpu.c)
+ (action
+  (run %{cc} -shared -fPIC -o %{targets} fake_not_wgpu.c)))
+
+(rule
+ (alias runtest)
+ (deps test_loader_fixture.exe fake_wrong_version.so)
+ (action
+  (run ./test_loader_fixture.exe wrong-version)))
+
+(rule
+ (alias runtest)
+ (deps test_loader_fixture.exe fake_wrong_version.so)
+ (action
+  (run ./test_loader_fixture.exe wrong-version-allowed)))
+
+(rule
+ (alias runtest)
+ (deps test_loader_fixture.exe fake_not_wgpu.so)
+ (action
+  (run ./test_loader_fixture.exe not-wgpu)))

@@ -1,0 +1,23 @@
+; What `build_site.exe --out DIR` is allowed to delete.  Needs no GPU, no
+; libwgpu_native and no odoc output (the site is built with --no-api).
+;
+; The deps are the files the site generator reads plus every repository file
+; its link checker resolves; --root points at the build context copy of them.
+; The list must be complete: run this with `dune build @runtest --sandbox copy`
+; to catch a dep that only works because the build directory happens to have
+; the file.
+
+(test
+ (name test_out_safety)
+ (libraries unix)
+ (deps
+  %{exe:../../doc/site/build_site.exe}
+  ../../README.md
+  ../../DESIGN.md
+  ../../docs/GUIDE.md
+  ../../doc/site/style.css
+  ../../doc/site/build_site.ml
+  ../../examples/headless_compute.ml
+  ../../examples/offscreen_render.ml
+  ../../vendor/wgpu-native/PROVENANCE.md
+  ../../vendor/wgpu-native/pin.txt))
