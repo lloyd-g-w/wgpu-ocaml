@@ -20,8 +20,11 @@
  (description
   "Bindings to the WebGPU C API (webgpu.h) and the wgpu-native extensions\n(wgpu.h), generated from the vendored upstream headers and bound with\nctypes-foreign.  libwgpu_native is loaded dynamically at run time; no C stubs\nare compiled and no headers are needed at build time.\n\nThis package is entirely AI-authored; see the README for details.")
  (depends
+  ; 5.5.1 is what the project is developed and primarily tested with; 5.2.0 is
+  ; the verified floor (CI builds and tests both) so that OxCaml switches
+  ; (5.2.0+ox) can pin this package.
   (ocaml
-   (>= 5.5.1))
+   (>= 5.2.0))
   (dune
    (>= 3.20))
   (ctypes

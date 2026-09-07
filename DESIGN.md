@@ -505,7 +505,8 @@ v29.0.1.1 (lavapipe):
 
 Also done (documentation/CI lane):
 
-* `.github/workflows/ci.yml` — OCaml 5.5.1 on `ubuntu-latest`: `dune build`,
+* `.github/workflows/ci.yml` — OCaml 5.5.1 (and 5.2.0, the declared floor,
+  for the build/unit/ABI job) on `ubuntu-latest`: `dune build`,
   `dune build @gen` (determinism), `dune test` (unit + ABI against the pinned
   headers), the checksummed `scripts/fetch_wgpu_native.exe` download, and
   `dune build @gpu` plus both examples on lavapipe

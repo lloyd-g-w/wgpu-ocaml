@@ -28,7 +28,8 @@ Works, tested, and **not released**: no opam release, no tagged version, no
 licence chosen yet (see [Licensing](#licensing)).
 
 Pinned to **wgpu-native v29.0.1.1** (commit `6aed5095`, `webgpu-headers`
-`673658bc`), built with **OCaml 5.5.1**, `ctypes` / `ctypes-foreign` 0.24.
+`673658bc`), built with **OCaml 5.5.1** (minimum **5.2.0**, which CI also
+tests), `ctypes` / `ctypes-foreign` 0.24.
 Developed and tested on Linux x86_64 against Mesa's **lavapipe** software
 rasteriser, headless. No other platform has been executed
 (see [Limitations](#limitations)).
@@ -82,7 +83,9 @@ up `libffi` and `pkg-config` in a throw-away prefix.
 
 To use the bindings from another project before there is an opam release:
 `opam pin add wgpu https://github.com/lloyd-g-w/wgpu-ocaml.git` — but read
-[Licensing](#licensing) first.
+[Licensing](#licensing) first. This also works from an
+[OxCaml](https://oxcaml.org) switch (`5.2.0+ox`), since the package only
+requires OCaml ≥ 5.2.0; see the [guide](docs/GUIDE.md#oxcaml) for the caveats.
 
 ### Nix / NixOS
 

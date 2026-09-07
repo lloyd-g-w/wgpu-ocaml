@@ -23,7 +23,7 @@ reference is at
 
 | what | which |
 |---|---|
-| OCaml | **5.5.1** (what the project is developed and tested with) |
+| OCaml | **5.5.1** (what the project is developed and tested with); **5.2.0** is the minimum, and CI builds and tests it too |
 | opam packages | `dune` (≥ 3.20), `ctypes` and `ctypes-foreign` (≥ 0.23; 0.24 is what is used here) |
 | system packages | `libffi-dev` and `pkg-config` — for building `ctypes-foreign`, not for these bindings |
 | at run time | `libwgpu_native` **v29.0.1.1**, and a Vulkan / Metal / DX12 adapter |
@@ -148,6 +148,30 @@ opam pin add wgpu https://github.com/lloyd-g-w/wgpu-ocaml.git
 and depend on it from your `dune-project`/`dune` as `wgpu`. Read
 [Licensing](../README.md#licensing) first: no licence has been chosen for the
 original code yet, so the repository is all-rights-reserved for now.
+
+### OxCaml
+
+[OxCaml](https://oxcaml.org) switches (`5.2.0+ox`) report `ocaml` as 5.2.0,
+and the package's constraint is `ocaml >= 5.2.0` precisely so that the same
+`opam pin add wgpu …` works there. The bindings use no language feature newer
+than 5.2, and the full suite (unit, ABI and GPU) passes on a plain 5.2.0
+switch.
+
+What has **not** been done is running the suite under OxCaml itself. Two
+things to know:
+
+* `ctypes`, `ctypes-foreign` and `integers` must install in your ox switch.
+  They come from the default opam repository, which the OxCaml switch also
+  uses; if OxCaml's repository carries a patched `ctypes`, that one is used
+  instead. Either way, `opam install ctypes-foreign` needs `libffi` and
+  `pkg-config` on the system (or `nix develop` from this repository).
+* The threading model (DESIGN.md §5) relies on the OCaml 5 runtime's
+  `caml_c_thread_register` semantics for foreign-thread callbacks; OxCaml uses
+  the OCaml 5 runtime, so this should hold, but it is inferred rather than
+  tested.
+
+If you try it, `dune build @runtest` (no GPU needed) is the quickest way to
+find out; please report the result.
 
 ## The two layers
 
