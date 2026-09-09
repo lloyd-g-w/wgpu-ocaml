@@ -95,9 +95,11 @@ requires OCaml ≥ 5.2.0; see the [guide](docs/GUIDE.md#oxcaml) for the caveats.
 ### Nix / NixOS
 
 `nix develop` supplies the system dependencies: **pkgconf**, **pkg-config**,
-**libffi**, a C compiler, opam, make, curl and unzip. On Linux
-it also supplies the Vulkan loader and diagnostic tools; your hardware driver
-still comes from the host. Use `nix develop .#software` to select Nix-provided
+**libffi**, **SDL2** (for the optional tsdl example), a C compiler, opam, make,
+curl and unzip. On Linux
+it also supplies the Vulkan loader and diagnostic tools, plus `xvfb-run`, an X
+server and ImageMagick for running and inspecting that example headlessly; your
+hardware driver still comes from the host. Use `nix develop .#software` to select Nix-provided
 Mesa lavapipe instead, with no physical GPU needed.
 
 Inside either shell, create the OCaml 5.5.1 switch as above, then run:
@@ -172,7 +174,13 @@ builders, no error sink, no logging wrapper and no arena.
 [`examples/headless_compute.ml`](examples/headless_compute.ml) and
 [`examples/offscreen_render.ml`](examples/offscreen_render.ml) are complete,
 runnable programs written this way, in the shape of wgpu-native's own C
-examples.
+examples. [`examples/sdl_window.with_tsdl.ml`](examples/sdl_window.with_tsdl.ml)
+adds a window: the same triangle, presented through a `WGPUSurface` built from
+an SDL2 window with [tsdl](https://github.com/dbuenzli/tsdl). `tsdl` is not a
+dependency of this package — dune's `(select)` builds `sdl_window.exe` from
+that file when tsdl is installed and from a one-line stub when it is not, so
+`dune build` works either way. See the guide,
+[Rendering to a window with tsdl](docs/GUIDE.md#rendering-to-a-window-with-tsdl).
 
 ## How it is built
 
@@ -201,8 +209,9 @@ examples.
 ## Documentation
 
 * [Guide](https://lloyd-g-w.github.io/wgpu-ocaml/guide.html) — installing,
-  descriptors and lifetimes, compute and render walkthroughs, callbacks and
-  polling, errors, the loader, limitations
+  descriptors and lifetimes, compute and render walkthroughs,
+  [rendering to a window with tsdl](docs/GUIDE.md#rendering-to-a-window-with-tsdl),
+  callbacks and polling, errors, the loader, limitations
   ([source](docs/GUIDE.md)).
 * [API reference](https://lloyd-g-w.github.io/wgpu-ocaml/api/wgpu/index.html) —
   odoc, generated from the sources.
@@ -219,9 +228,12 @@ dune exec doc/site/build_site.exe -- --out _site
 
 ## Limitations
 
-* **Raw bindings.** There is no windowing, surface or swapchain integration,
-  and no convenience wrapper for anything: you write descriptors, you own the
-  memory they point at, and you release every handle yourself.
+* **Raw bindings.** There is no windowing or swapchain integration, and no
+  convenience wrapper for anything: you write descriptors, you own the memory
+  they point at, and you release every handle yourself. The surface entry
+  points are bound like everything else, and
+  `examples/sdl_window.with_tsdl.ml` shows
+  them driven from an SDL2 window (X11 only so far).
 * **Unusable in wgpu-native v29 regardless of these bindings**: `WGPUFuture` /
   `wgpuInstanceWaitAny` (asynchronous work is driven by polling instead),
   `wgpuGetProcAddress`, and the 35 entry points listed as `unimplemented` in

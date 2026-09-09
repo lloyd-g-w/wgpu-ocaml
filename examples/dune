@@ -4,4 +4,32 @@
 
 (executables
  (names headless_compute offscreen_render)
+ (modules headless_compute offscreen_render)
  (libraries wgpu wgpu.utils ctypes))
+
+; The windowed example additionally needs tsdl (and, at run time, SDL2 and a
+; display), which is not a dependency of this package.  (select) is what makes
+; that optional: with tsdl installed, sdl_window.exe is
+; sdl_window.with_tsdl.ml and links tsdl; without it, it is the one-line
+; sdl_window.without_tsdl.ml stub, so `dune build` works either way.  dune's
+; (optional) field would not do this - it only affects installation, not the
+; build (dune's own test/blackbox-tests/test-cases/optional-executable.t).
+;
+; sdl_syswm is compiled into the executable rather than being a library:
+; test/sdl compiles the same source against ctypes alone to check the
+; SDL_SysWMinfo layout it declares.  It never mentions tsdl, so it builds in
+; both configurations.
+
+(executable
+ (name sdl_window)
+ (modules sdl_window sdl_syswm)
+ (libraries
+  wgpu
+  wgpu.utils
+  ctypes
+  ctypes.foreign
+  (select
+   sdl_window.ml
+   from
+   (tsdl -> sdl_window.with_tsdl.ml)
+   (-> sdl_window.without_tsdl.ml))))

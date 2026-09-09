@@ -1,0 +1,25 @@
+; SDL_SysWMinfo conformance: the C compiler computes the layout from SDL2's
+; own headers; ctypes computes it from the declaration in
+; examples/sdl_syswm.ml, which examples/sdl_window.exe uses to turn an
+; SDL window into a WebGPU surface.  The two dumps must agree.
+;
+; This test needs a C compiler and SDL2's headers (pkg-config sdl2); it skips
+; itself when they are absent, and it needs neither tsdl, nor libwgpu_native,
+; nor a display.
+
+(copy_files
+ (files %{project_root}/examples/sdl_syswm.ml))
+
+(executable
+ (name dump_syswm_abi)
+ (modules dump_syswm_abi sdl_syswm)
+ (libraries ctypes ctypes.foreign))
+
+(rule
+ (alias runtest)
+ (deps
+  (:script check_syswm_abi.sh)
+  (:probe syswm_probe.c)
+  (:dump dump_syswm_abi.exe))
+ (action
+  (run sh %{script} %{probe} %{dump} %{cc})))

@@ -28,6 +28,11 @@ no licence has been chosen for the original code yet.
   example-driven walkthrough: installing the native library, handles, enums
   and bit sets, struct defaults, descriptors and lifetimes, compute, offscreen
   rendering, callbacks and polling, errors.
+- {{:https://lloyd-g-w.github.io/wgpu-ocaml/guide.html#rendering-to-a-window-with-tsdl}Rendering
+  to a window with tsdl} — building a [WGPUSurface] from an SDL2 window
+  ([SDL_GetWindowWMInfo] bound with ctypes-foreign), surface capabilities and
+  configuration, and the frame loop; the runnable program is
+  [examples/sdl_window.with_tsdl.ml].
 - {{:https://lloyd-g-w.github.io/wgpu-ocaml/}Project home} — install,
   quick start, status, limitations.
 - {{:https://lloyd-g-w.github.io/wgpu-ocaml/design.html}Design contract} —

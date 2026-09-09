@@ -39,7 +39,8 @@ Non-goals (deliberately, to keep this a simpler sibling of `ocaml-vulkan`):
   exception to this rule — it is the only *correct* way to build the function
   pointer a WebGPU descriptor wants (§5).
 * No windowing, surface or swapchain helpers (the raw surface entry points are
-  all bound).
+  all bound, and `examples/sdl_window.with_tsdl.ml` drives them from an SDL2
+  window with tsdl, from outside the library).
 * No async/effects/Lwt integration. WebGPU's async calls are driven by
   polling, which is what wgpu-native itself does (§5).
 * No attempt to support several wgpu-native versions at once. One pin,
@@ -78,7 +79,12 @@ test/abi/                    needs a C compiler; no GPU, no libwgpu_native
 test/loader/                 needs a C compiler; version gate fixtures
 test/thread/                 needs a C compiler; foreign-thread callbacks
 test/gpu/                    needs libwgpu_native and an adapter
-examples/                    headless_compute.ml, offscreen_render.ml
+test/sdl/                    needs a C compiler and SDL2's headers; skips
+                             itself when pkg-config cannot find sdl2
+examples/                    headless_compute.ml, offscreen_render.ml, and the
+                             windowed sdl_window.with_tsdl.ml + sdl_syswm.ml
+                             (dune (select)s sdl_window.without_tsdl.ml when
+                             tsdl is not installed)
 doc/index.mld                odoc landing page for the "wgpu" package
 doc/site/build_site.ml       static site generator (stdlib only) + style.css
 docs/GUIDE.md                the example-driven guide
@@ -379,6 +385,14 @@ Three tiers, deliberately separated so the cheap ones run anywhere.
   "not a wgpu-native library" path, see §6.
 * `test/thread/` — needs a C compiler. Callbacks arriving on a foreign
   thread, see §5.1.
+* `test/sdl/` — needs a C compiler and SDL2's headers, nothing else (no tsdl,
+  no display, no `libwgpu_native`). A C probe compiled against SDL2's own
+  headers dumps the size, alignment, field offsets and `SDL_SYSWM_TYPE` values
+  of `SDL_SysWMinfo`; `dump_syswm_abi.exe` dumps the same from `ctypes` and
+  the declaration in `examples/sdl_syswm.ml`, which
+  `examples/sdl_window.with_tsdl.ml` reads the native window handles with; the
+  test is a `diff` of the two. It prints why it skipped when `pkg-config` cannot find
+  `sdl2`, because SDL is not a dependency of this project.
 * `test/abi/` — needs a C compiler. `gen.exe abi-probe` emits a C program
   that prints, from the **vendored headers**, every struct size/alignment,
   every field offset, every enum and bit-set value, every sentinel, and every
@@ -511,11 +525,14 @@ v29.0.1.1 (lavapipe):
   examples, tests.
 * `dune build @gen` — committed generated code is reproducible.
 * `dune test` — 145 checks across the unit, generator, site, loader and
-  foreign-thread suites, plus the 1914-line ABI/defaults diff.
+  foreign-thread suites, plus the 1914-line ABI/defaults diff and, where
+  SDL2's headers are installed, the 17-line `SDL_SysWMinfo` diff.
 * `dune build @gpu` — 71 checks across six GPU tests on the reference host
   (device 16, compute 5, render 12, errors 10, gc lifetime 10, callback
   safety 18; the device count varies with the number of enumerated adapters).
-* `dune exec examples/headless_compute.exe`, `…/offscreen_render.exe`.
+* `dune exec examples/headless_compute.exe`, `…/offscreen_render.exe`, and
+  `xvfb-run -a dune exec examples/sdl_window.exe -- --frames 30` (Linux/X11 +
+  lavapipe; the Wayland branch of that example is unexecuted).
 * `dune exec scripts/fetch_wgpu_native.exe` — checksummed install.
 * `opam install .` — the package installs into the switch.
 * `dune build @doc` — odoc API reference, no warnings, no GPU and no native
@@ -529,10 +546,12 @@ Also done (documentation/CI lane):
   for the build/unit/ABI job) on `ubuntu-latest`: `dune build`,
   `dune build @gen` (determinism), `dune test` (unit + ABI against the pinned
   headers), the checksummed `scripts/fetch_wgpu_native.exe` download, and
-  `dune build @gpu` plus both examples on lavapipe
-  (`mesa-vulkan-drivers` + `VK_ICD_FILENAMES=…/lvp_icd.json`). It needs
-  `libffi-dev` + `pkg-config` for `ctypes-foreign` and a C compiler for the
-  ABI probe and the `test/loader` / `test/thread` fixtures.
+  `dune build @gpu` plus all three examples on lavapipe
+  (`mesa-vulkan-drivers` + `VK_ICD_FILENAMES=…/lvp_icd.json`), the windowed one
+  under `xvfb-run` after `opam install tsdl`. It needs
+  `libffi-dev` + `pkg-config` for `ctypes-foreign`, a C compiler for the
+  ABI probe and the `test/loader` / `test/thread` fixtures, and
+  `libsdl2-dev` + `xvfb` for the windowed example.
   `scripts/no-root-deps.sh` documents the fallback used while developing in a
   sandbox without root.
 * `.github/workflows/docs.yml` — builds `doc/index.mld` + the odoc API

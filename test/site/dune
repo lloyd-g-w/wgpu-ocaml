@@ -17,7 +17,11 @@
   ../../docs/GUIDE.md
   ../../doc/site/style.css
   ../../doc/site/build_site.ml
+  ../../examples/dune
   ../../examples/headless_compute.ml
   ../../examples/offscreen_render.ml
+  ../../examples/sdl_syswm.ml
+  ../../examples/sdl_window.with_tsdl.ml
+  ../../examples/sdl_window.without_tsdl.ml
   ../../vendor/wgpu-native/PROVENANCE.md
   ../../vendor/wgpu-native/pin.txt))

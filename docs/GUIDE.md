@@ -20,7 +20,11 @@ wrapper, so there is also no coverage list to check your idea against.
 
 Runnable versions of the two big examples are
 [`examples/headless_compute.ml`](../examples/headless_compute.ml) and
-[`examples/offscreen_render.ml`](../examples/offscreen_render.ml). The API
+[`examples/offscreen_render.ml`](../examples/offscreen_render.ml);
+[`examples/sdl_window.with_tsdl.ml`](../examples/sdl_window.with_tsdl.ml) puts
+the same triangle in
+an SDL2 window (see
+[Rendering to a window with tsdl](#rendering-to-a-window-with-tsdl)). The API
 reference is at
 <https://lloyd-g-w.github.io/wgpu-ocaml/api/wgpu/index.html>.
 
@@ -96,8 +100,11 @@ system packages at all, `scripts/no-root-deps.sh` sets up `libffi` and
 
 The repository's `flake.nix` and committed `flake.lock` provide a reproducible
 **system-dependency shell**, not a Nix build of the OCaml package. It includes
-both `pkgconf` and `pkg-config`, `libffi` and its development headers, a C
-compiler, make, opam, git, curl and unzip. OCaml and its packages
+both `pkgconf` and `pkg-config`, `libffi` and its development headers, SDL2 and
+its headers (for `opam install tsdl` and the windowed example), a C
+compiler, make, opam, git, curl and unzip; on Linux also `xvfb-run`, an X
+server and ImageMagick, which is how the windowed example is run and checked
+without a display. OCaml and its packages
 are deliberately left to opam so the compiler stays at **5.5.1** regardless of
 which OCaml version nixpkgs carries. The pinned downloader still installs
 wgpu-native; nixpkgs' potentially incompatible version is not used.
@@ -590,6 +597,230 @@ let bytes_per_row = ((width * 4) + 255) / 256 * 256
 ```
 
 
+## Rendering to a window with tsdl
+
+[`examples/sdl_window.with_tsdl.ml`](../examples/sdl_window.with_tsdl.ml) is
+the same triangle in a resizable SDL2 window, using
+[tsdl](https://github.com/dbuenzli/tsdl) for the window and the event loop. It
+is wgpu-native's own `examples/triangle/main.c` with tsdl where that example
+has GLFW.
+
+```sh
+opam install tsdl                       # needs SDL2 (libsdl2-dev, or Nix)
+dune exec examples/sdl_window.exe
+dune exec examples/sdl_window.exe -- --frames 30      # render N frames, exit
+```
+
+`tsdl` is deliberately **not** a dependency of the `wgpu` package, which is why
+there are two files: [`examples/dune`](../examples/dune) uses dune's `(select)`
+to build `sdl_window.exe` from `sdl_window.with_tsdl.ml` when tsdl is
+installed and from the one-line
+[`sdl_window.without_tsdl.ml`](../examples/sdl_window.without_tsdl.ml) stub
+(which tells you to install tsdl and exits 1) when it is not, so `dune build`
+works either way. Dune's `(optional)` field would not achieve that: it only
+affects installation, not the build.
+
+### Why `SDL_GetWindowWMInfo`, and how it is bound
+
+WebGPU has no notion of a window. `wgpuInstanceCreateSurface` takes a
+`WGPUSurfaceDescriptor` whose `nextInChain` must carry a *native* handle:
+`WGPUSurfaceSourceXlibWindow` (an Xlib `Display *` and a `Window`),
+`WGPUSurfaceSourceWaylandSurface` (a `wl_display *` and a `wl_surface *`),
+`WGPUSurfaceSourceWindowsHWND`, or `WGPUSurfaceSourceMetalLayer`.
+
+tsdl exposes `Sdl.unsafe_ptr_of_window : window -> nativeint` — the raw
+`SDL_Window *` — but not `SDL_GetWindowWMInfo`, which is the SDL entry point
+that turns that into the handles above. So the example binds that one function
+itself, in [`examples/sdl_syswm.ml`](../examples/sdl_syswm.ml), with
+`ctypes-foreign`:
+
+```ocaml
+let sdl_get_window_wm_info =
+  lazy (Foreign.foreign "SDL_GetWindowWMInfo"
+          Ctypes.(ptr void @-> ptr Sys_wm_info.t @-> returning int))
+```
+
+Three details make that work:
+
+* **No library has to be found.** tsdl's own C stubs link libSDL2 into the
+  process, so the symbol is already in the global scope and
+  `Foreign.foreign`'s default `dlsym` handle resolves it. (`sdl_syswm.ml`
+  falls back to `Dl.dlopen "libSDL2-2.0.so.0"` if it is ever linked without
+  tsdl, and resolves lazily so that merely linking the module opens nothing.)
+* **`SDL_SysWMinfo` is versioned.** SDL refuses to fill in a structure whose
+  `version` field does not match the running library — in C you set it with the
+  `SDL_VERSION` macro. There is no macro here, so the example calls
+  `SDL_GetVersion` on the *running* library and writes the answer into the
+  field before the call, which is also the only honest thing to do from a
+  binding that never saw SDL's headers.
+* **The layout is platform-specific, so it is checked rather than guessed.**
+  `SDL_SysWMinfo` is `{ SDL_version version; SDL_SYSWM_TYPE subsystem; union
+  {...} info; }`, and which members of that union exist depends on the video
+  drivers SDL was built with. `test/sdl` compiles a C probe against SDL2's
+  real headers, dumps the struct size, alignment, every field offset the
+  example uses and the `SDL_SYSWM_TYPE` values, dumps the same from `ctypes`
+  and the declaration in `sdl_syswm.ml`, and diffs the two — the same shape as
+  the ABI test in [What the tests check](#what-the-tests-check-and-how-to-run-them).
+  It skips itself when `pkg-config` cannot find `sdl2`, and it needs neither
+  tsdl nor a display.
+
+### From an SDL window to a `WGPUSurface`
+
+`Sdl_syswm.of_window` returns what SDL filled in, and each platform chains a
+different extension struct — exactly like any other chained struct (see
+[Descriptors and chained structs](#descriptors-and-chained-structs)), including
+the rule that the extension struct must stay alive across the call:
+
+```ocaml
+match Sdl_syswm.of_window (Tsdl.Sdl.unsafe_ptr_of_window window) with
+| Ok (Sdl_syswm.X11 { display; window }) ->
+    let source = T.SurfaceSourceXlibWindow.init () in    (* sets chain.sType *)
+    Ctypes.setf source T.SurfaceSourceXlibWindow.display display;
+    Ctypes.setf source T.SurfaceSourceXlibWindow.window window;
+    Ctypes.setf desc T.SurfaceDescriptor.nextInChain
+      (Ctypes.coerce (Ctypes.ptr T.SurfaceSourceXlibWindow.t)
+         (Ctypes.ptr T.ChainedStruct.t) (Ctypes.addr source));
+    let surface = F.wgpuInstanceCreateSurface instance (Ctypes.addr desc) in
+    ignore (Sys.opaque_identity (desc, source));
+    surface
+| Ok (Sdl_syswm.Wayland { display; surface = wl_surface }) -> ...
+```
+
+The surface then belongs in the adapter request, so that the adapter you get
+can actually present to it:
+
+```ocaml
+let options = T.RequestAdapterOptions.init () in
+Ctypes.setf options T.RequestAdapterOptions.compatibleSurface surface;
+let adapter = Result.get_ok (U.Sync.request_adapter ~options instance)
+```
+
+### Capabilities and configuration
+
+A surface must be *configured* before it produces textures, and what it accepts
+depends on the adapter. `wgpuSurfaceGetCapabilities` fills three arrays that
+wgpu owns until `wgpuSurfaceCapabilitiesFreeMembers`, so read them and free
+them straight away:
+
+```ocaml
+let caps = T.SurfaceCapabilities.init () in
+if F.wgpuSurfaceGetCapabilities surface adapter (Ctypes.addr caps) <> T.Status.success then
+  die "wgpuSurfaceGetCapabilities failed";
+let array_of field count_field =
+  let n = Unsigned.Size_t.to_int (Ctypes.getf caps count_field) in
+  let p = Ctypes.getf caps field in
+  List.init n (fun i -> Ctypes.( !@ ) (Ctypes.( +@ ) p i))
+in
+let formats = array_of T.SurfaceCapabilities.formats T.SurfaceCapabilities.formatCount in
+...
+F.wgpuSurfaceCapabilitiesFreeMembers caps
+```
+
+The first format is the preferred one and is what the render pipeline's colour
+target must use; `WGPUPresentMode_Fifo` is the only present mode WebGPU
+guarantees, so the example prefers it and falls back to the first one offered.
+The configuration is one `WGPUSurfaceConfiguration` value that is kept and
+reused, because resizing only changes two of its fields:
+
+```ocaml
+let config = T.SurfaceConfiguration.init () in
+Ctypes.setf config T.SurfaceConfiguration.device device;
+Ctypes.setf config T.SurfaceConfiguration.format format;
+Ctypes.setf config T.SurfaceConfiguration.usage T.TextureUsage.render_attachment;
+Ctypes.setf config T.SurfaceConfiguration.alphaMode alpha_mode;
+Ctypes.setf config T.SurfaceConfiguration.presentMode present_mode;
+let configure () =
+  let w, h = Tsdl.Sdl.get_window_size window in
+  if w > 0 && h > 0 then begin
+    Ctypes.setf config T.SurfaceConfiguration.width (u32 w);
+    Ctypes.setf config T.SurfaceConfiguration.height (u32 h);
+    F.wgpuSurfaceConfigure surface (Ctypes.addr config)
+  end
+```
+
+### The frame loop
+
+Each frame: pump SDL's events, ask the surface for a texture, check the status,
+render into a view of it, submit, present, and release everything the frame
+owns.
+
+```ocaml
+let frame = T.SurfaceTexture.init () in
+F.wgpuSurfaceGetCurrentTexture surface (Ctypes.addr frame);
+let status = Ctypes.getf frame T.SurfaceTexture.status in
+let texture = Ctypes.getf frame T.SurfaceTexture.texture in
+if status = T.SurfaceGetCurrentTextureStatus.success_optimal
+   || status = T.SurfaceGetCurrentTextureStatus.success_suboptimal
+then begin
+  let view = F.wgpuTextureCreateView texture (Ctypes.addr view_desc) in
+  (* build constant label views ONCE, outside the loop: the bytes behind a
+     WGPUStringView are retained, and a per-frame [sv] would grow forever *)
+  draw view;                              (* the render pass of the offscreen example *)
+  ignore (F.wgpuSurfacePresent surface);
+  F.wgpuTextureViewRelease view;
+  F.wgpuTextureRelease texture
+end
+```
+
+`wgpuSurfaceGetCurrentTexture` hands the texture over **with ownership**: the
+view and the texture are released every frame, not just at the end. The
+remaining statuses are `Timeout`, `Outdated` and `Lost` — recoverable, so the
+frame is dropped and the surface reconfigured — and `Error`, which is fatal.
+(`wgpu.h` adds one more, `Occluded` = `0x00030001`, reported by Metal only; it
+is outside the generated `webgpu.h` enum, so it prints as hex and is treated
+like the recoverable ones.) A `--frames` run also gives up after `10 × N`
+attempts so a stuck surface fails fast instead of spinning.
+The example additionally *counts* every non-success status and exits non-zero
+if any occurred, which is stricter than a real application should be: a program
+meant to survive monitor and compositor changes treats `Outdated` as routine.
+
+Resizing is two lines, because everything is already in `configure ()`:
+
+```ocaml
+match Tsdl.Sdl.Event.(window_event_enum (get event window_event_id)) with
+| `Close -> quit := true
+| `Resized | `Size_changed -> configure ()
+| _ -> ()
+```
+
+Teardown is the usual rule — release what you created, in reverse order — plus
+`wgpuSurfaceUnconfigure` before the surface itself, and SDL last:
+
+```ocaml
+F.wgpuSurfaceUnconfigure surface;
+F.wgpuRenderPipelineRelease pipeline;
+F.wgpuShaderModuleRelease shader_module;
+F.wgpuQueueRelease queue;
+F.wgpuDeviceRelease device;
+F.wgpuAdapterRelease adapter;
+F.wgpuSurfaceRelease surface;
+F.wgpuInstanceRelease instance;
+Tsdl.Sdl.destroy_window window;
+Tsdl.Sdl.quit ()
+```
+
+### What is tested
+
+**Linux/X11 only.** CI runs `xvfb-run -a dune exec examples/sdl_window.exe --
+--frames 30` on lavapipe: an X11 window on a virtual X server, rendered by
+Mesa's software rasteriser, asserting a zero exit status and the
+`presented 30 frames` line. That exercises `SDL_GetWindowWMInfo`, the
+`WGPUSurfaceSourceXlibWindow` branch, `wgpuSurfaceGetCapabilities`,
+`wgpuSurfaceConfigure` and 30 real `wgpuSurfacePresent` calls. During
+development the same run was screenshotted from the X server while it was
+running, and the picture is the expected one (red lower-left half, blue
+upper-right).
+
+The **Wayland** branch is written from the header and wgpu-native's GLFW
+example and has **never been executed**. There is no Windows or macOS branch at
+all: they would need `WGPUSurfaceSourceWindowsHWND` and
+`WGPUSurfaceSourceMetalLayer` (which also needs a `CAMetalLayer` on the
+window's `NSView`), and neither could be tested here, so the example says so in
+a comment instead of guessing. `test/sdl` checks the `SDL_SysWMinfo` layout
+wherever `pkg-config sdl2` resolves: in CI's fast job against Ubuntu's genuine
+`libsdl2-dev`, and on the development host against nixpkgs' `SDL2`, which is
+**sdl2-compat 2.32.68** (the SDL2 API on top of SDL3) — both Linux x86_64.
+
 ## Handles, enums, bit sets and structs
 
 Everything below is generated, so it is exactly what the headers say.
@@ -881,7 +1112,10 @@ dune build @gpu  # 71 checks against a real adapter
   headers, dumps every struct size and alignment, every field offset, every
   enum and bit-set value, every sentinel and every `WGPU_*_INIT` field value,
   dumps the same from `ctypes` and the generated bindings, and diffs the two.
-  1914 identical lines, 543 of them default-value assertions.
+  1914 identical lines, 543 of them default-value assertions. `test/sdl` does
+  the same for `SDL_SysWMinfo` against SDL2's headers when `pkg-config` finds
+  `sdl2`, and prints why it skipped when it does not (see
+  [Rendering to a window with tsdl](#rendering-to-a-window-with-tsdl)).
 * **`dune build @gen`** regenerates the four generated modules from the
   vendored headers and diffs them against the committed copies (`dune promote`
   accepts a new output).
@@ -912,10 +1146,13 @@ byte-for-byte reproducible.
 
 ## Limitations to plan around
 
-* **Raw bindings.** There is no windowing, surface or swapchain integration
-  and no convenience wrapper for anything: you fill in descriptors, you keep
-  the memory they point at alive, you check for null handles and you release
-  every handle yourself. What you get in exchange is that nothing is missing.
+* **Raw bindings.** There is no windowing or swapchain *integration* and no
+  convenience wrapper for anything: you fill in descriptors, you keep the
+  memory they point at alive, you check for null handles and you release every
+  handle yourself. What you get in exchange is that nothing is missing — the
+  surface entry points are all bound, and
+  [Rendering to a window with tsdl](#rendering-to-a-window-with-tsdl) drives
+  them from an SDL2 window without any help from the library.
 * **Not usable in wgpu-native v29 at all**: futures, `wgpuGetProcAddress`, and
   the 35 unimplemented entry points above.
 * **One pin.** These bindings target wgpu-native v29.0.1.1 only; the loader

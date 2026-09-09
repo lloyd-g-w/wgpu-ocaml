@@ -36,7 +36,9 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libffi-dev pkg-config gcc
+          # libsdl2-dev is only for test/sdl, the SDL_SysWMinfo layout check
+          # behind the tsdl example; it needs no tsdl, display or GPU.
+          sudo apt-get install -y --no-install-recommends libffi-dev pkg-config gcc libsdl2-dev
 
       - name: Set up OCaml ${{ matrix.ocaml }}
         uses: ocaml/setup-ocaml@v3
@@ -75,11 +77,14 @@ jobs:
 
       # mesa-vulkan-drivers brings Mesa's lavapipe software rasteriser, which
       # is the adapter these tests run on; vulkan-tools is diagnostics only.
+      # libsdl2-dev + xvfb are for examples/sdl_window.exe, which needs an
+      # X server to present to.
       - name: Install system packages
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libffi-dev pkg-config gcc mesa-vulkan-drivers vulkan-tools unzip curl
+            libffi-dev pkg-config gcc mesa-vulkan-drivers vulkan-tools unzip curl \
+            libsdl2-dev xvfb
 
       - name: Set up OCaml 5.5.1
         uses: ocaml/setup-ocaml@v3
@@ -88,6 +93,13 @@ jobs:
 
       - name: Install opam dependencies
         run: opam install . --deps-only --with-test
+
+      # tsdl is not a dependency of this package: examples/dune (select)s
+      # sdl_window.exe between the real example and a stub, so tsdl must be
+      # installed before anything builds it.  The build-and-test job installs
+      # no tsdl and therefore builds the stub.
+      - name: Install tsdl (for the windowed example)
+        run: opam install tsdl
 
       # Downloads the pinned release archive and verifies its SHA-256 against
       # vendor/wgpu-native/pin.txt; it refuses to install on a mismatch, so
@@ -127,3 +139,13 @@ jobs:
           opam exec -- dune exec examples/offscreen_render.exe | tee render.out
           grep -q 'bottom-left pixel: r=255 g=0 b=0 a=255' render.out
           grep -q 'top-right pixel:   r=0 g=0 b=255 a=255' render.out
+
+      # A real X11 window on a virtual X server: SDL_GetWindowWMInfo, a surface
+      # chained from WGPUSurfaceSourceXlibWindow, and 30 presented frames.  The
+      # example exits non-zero if any frame's surface texture status was not
+      # success/suboptimal or the uncaptured-error callback fired.
+      - name: Example — windowed render on Xvfb (tsdl)
+        run: |
+          xvfb-run -a opam exec -- dune exec examples/sdl_window.exe -- --frames 30 > sdl.out
+          cat sdl.out
+          grep -qx 'presented 30 frames' sdl.out
